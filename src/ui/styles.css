@@ -148,15 +148,51 @@ button.danger {
   flex: 1;
 }
 
-/* ---- メルド（場） ---- */
+/* ---- メルド（場）: 3D 卓が一次情報。2D は右上のコンパクトなトグル式ミニリストへ退避（契約05項目3） ---- */
+.meldpanel {
+  position: absolute;
+  top: 58px;
+  right: 8px;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: min(46vw, 340px);
+  pointer-events: auto;
+}
+.meldtoggle {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--panel);
+  backdrop-filter: blur(6px);
+}
+.meldtoggle .chev {
+  color: var(--muted);
+}
 .melds {
-  margin: 10px 14px 0;
+  margin: 0;
+  padding: 8px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(6px);
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  justify-content: flex-end;
   align-content: flex-start;
-  max-height: 34vh;
+  max-height: 56vh;
   overflow-y: auto;
+}
+.meldpanel:not(.open) .melds {
+  display: none;
 }
 .meld {
   display: flex;
@@ -278,49 +314,7 @@ button.danger {
   box-shadow: 0 14px 30px rgba(0, 0, 0, 0.6);
 }
 
-/* ドラッグ開始時に表示するドロップゾーン（R4項目2）。左=捨てる / 右=メルド公開。 */
-.dropzones {
-  position: absolute;
-  inset: 0;
-  z-index: 5; /* overlay(10) の下＝メルドチップは上に見える／canvas より上 */
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.dropzones.show {
-  opacity: 1;
-}
-.zone {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 16px;
-  border: 2px dashed rgba(150, 180, 220, 0.5);
-  background: rgba(18, 28, 42, 0.35);
-  color: var(--muted);
-  font-weight: 800;
-  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
-}
-.zone .ic {
-  font-size: 30px;
-  line-height: 1;
-}
-.zone .lb {
-  font-size: 15px;
-}
-.zone.discard.hot {
-  border-color: var(--accent-2);
-  background: rgba(216, 161, 58, 0.28);
-  color: #ffe6a8;
-}
-.zone.meld.hot {
-  border-color: var(--accent);
-  background: rgba(47, 158, 106, 0.28);
-  color: #b8f2d4;
-}
+/* 2D メルドチップ（パネル展開時）への付け札ドロップ時のホバー枠。3D 標的の光枠と対を成す。 */
 .meld.drop-over {
   outline: 3px solid var(--accent);
   box-shadow: 0 0 18px rgba(47, 158, 106, 0.7);
@@ -705,8 +699,11 @@ table.score td.win {
     width: 52px;
     height: 74px;
   }
+  .meldpanel {
+    max-width: 62vw;
+  }
   .melds {
-    max-height: 26vh;
+    max-height: 44vh;
   }
   .callout {
     top: 38%;

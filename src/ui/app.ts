@@ -64,8 +64,8 @@ export class GameUI {
   private handCards: { id: string; el: HTMLElement }[] = [];
   private focusedId: string | null = null;
   private lastView: PlayerView | null = null; // 直近の表示順ビュー（ドラッグ操作から参照）
-  // ドロップゾーン可視化（R4項目2）
-  private dropzonesEl: HTMLElement | null = null;
+  // メルドの被り解消（契約05項目3）: 2D メルドリストは既定で折り畳み、3D 卓を一次情報にする。
+  private meldPanelOpen = false;
   // ツモ演出（R4項目4: 大きめ表示→扇形へスライド→数秒ハイライト）
   private drawnId: string | null = null;
   private drawnBig = false;
@@ -164,7 +164,7 @@ export class GameUI {
     this.cardEls.clear();
     this.handCards = [];
     this.focusedId = null;
-    this.dropzonesEl = null;
+    this.meldPanelOpen = false;
     this.drag = null;
     this.drawnId = null;
     this.drawnBig = false;
@@ -270,10 +270,9 @@ export class GameUI {
     this.handEl = el('div', { class: 'hand fan' });
     this.footerEl = el('div', { class: 'footer' });
     this.bottomEl = el('div', { class: 'bottom' }, [this.handEl, this.footerEl]);
-    this.dropzonesEl = el('div', { class: 'dropzones' });
     this.toastEl = el('div', { class: 'toast' });
     this.vignetteEl = el('div', { class: 'vignette' }); // 画面周縁を落とす映画的ビネット（3D品質）
-    this.root.append(this.sceneHost, this.vignetteEl, this.overlay, this.dropzonesEl, this.bottomEl, this.toastEl);
+    this.root.append(this.sceneHost, this.vignetteEl, this.overlay, this.bottomEl, this.toastEl);
     this.attachHandContainer(this.handEl);
 
     // SFX とコールアウト層。コールアウトは overlay とは別に root 直下へ（最前面・pointer 透過）。
@@ -494,13 +493,13 @@ export class GameUI {
     ]);
   }
 
+  // メルドは 3D 卓が一次情報。2D は画面右上のコンパクトなトグル式ミニリストに退避し、3D の視界を確保する
+  // （契約05項目3）。展開時は付け札の 2D タップ/ドロップ導線も残す（3D 直接D&Dの補助）。
   private buildMelds(view: PlayerView): HTMLElement {
-    const wrap = el('div', { class: 'melds' });
+    const list = el('div', { class: 'melds' });
     const nameOf = (id: string): string => view.seats.find((s) => s.id === id)?.name ?? '?';
     const sel = this.selectedCards(view);
     const attachCard = sel.length === 1 ? sel[0]! : null;
-    // 付け札は自分がメルドを1つ以上公開済みでなければ不可（要件§2.3）。かつ自分の手番中のみ。
-    // 未公開プレイヤー・他家手番には付け札UI（ハイライト・タップ受付）を出さない。
     const meId = this.driver!.currentPlayerId();
     const hasOwnMeld = view.melds.some((m) => m.owner === meId);
     const myTurn = this.isMyTurn(view);
@@ -520,12 +519,25 @@ export class GameUI {
             this.selected.clear(),
           );
       }
-      wrap.append(node);
+      list.append(node);
     }
     if (view.melds.length === 0) {
-      wrap.append(el('span', { class: 'hint', text: '場にメルドはまだありません' }));
+      list.append(el('span', { class: 'hint', text: '場にメルドはまだありません' }));
     }
-    return wrap;
+
+    const panel = el('div', { class: 'meldpanel' + (this.meldPanelOpen ? ' open' : '') });
+    const chev = el('span', { class: 'chev', text: this.meldPanelOpen ? '▾' : '▸' });
+    const header = el('button', { class: 'meldtoggle' }, [
+      el('span', { text: `場のメルド ${view.melds.length}` }),
+      chev,
+    ]);
+    header.onclick = () => {
+      this.meldPanelOpen = !this.meldPanelOpen;
+      panel.classList.toggle('open', this.meldPanelOpen);
+      chev.textContent = this.meldPanelOpen ? '▾' : '▸';
+    };
+    panel.append(header, list);
+    return panel;
   }
 
   private chip(c: Card): HTMLElement {
@@ -705,7 +717,8 @@ export class GameUI {
       }
       this.dragging = false;
       this.focusedId = null;
-      this.hideDropzones();
+      this.scene?.hideDropTargets();
+      this.clearMeldHighlight();
       if (this.resolveDrop(id, e.clientX, e.clientY)) return; // 成功 dispatch → subscribe で render
       this.commitOrder();
       this.render();
@@ -774,10 +787,12 @@ export class GameUI {
 
   // ---- ドラッグ中の挙動・ドロップゾーン（R4項目2/5） --------------------
 
-  // canPlay（自分の捨てフェーズ）ならドロップゾーンを可視化。
+  // ドラッグ開始時に 3D 卓上の全ドロップ先（捨て札・場・付け札可能メルド）を同時に光らせる（E5）。
   private beginDragVisuals(): void {
     const v = this.lastView;
-    if (v && this.isMyTurn(v) && v.phase === 'awaitingDiscard') this.showDropzones();
+    if (!(v && this.isMyTurn(v) && v.phase === 'awaitingDiscard')) return;
+    const card = this.drag ? v.hand.find((c) => cardId(c) === this.drag!.id) ?? null : null;
+    this.scene?.showDropTargets(this.attachableMeldIds(v, card));
   }
 
   private canPlayNow(): boolean {
@@ -785,74 +800,33 @@ export class GameUI {
     return !!v && this.isMyTurn(v) && v.phase === 'awaitingDiscard';
   }
 
+  // 付け札できるメルドID（自メルド公開済み & canAttach）。ドラッグ中の 3D 光枠に使う。
+  private attachableMeldIds(view: PlayerView, card: Card | null): number[] {
+    const me = this.driver!.currentPlayerId();
+    if (!view.melds.some((m) => m.owner === me)) return [];
+    return view.melds.filter((m) => (card ? canAttach(m, card) : true)).map((m) => m.id);
+  }
+
   private moveDrag(id: string, x: number, y: number): void {
     const handTop = this.handEl!.getBoundingClientRect().top;
     if (this.canPlayNow() && y < handTop - 6) {
-      this.updateDropzones(id, x, y); // プレイゾーン: ゾーン/メルドのハイライト（並び替えしない）
+      // プレイ帯（手札の上）: 3D 標的をホバー強調。2D メルドチップ（パネル展開時）があれば優先。
+      const v = this.lastView!;
+      const card = v.hand.find((c) => cardId(c) === id) ?? null;
+      const dom = card ? this.domMeldAt(card, x, y) : null;
+      if (dom) {
+        this.highlightMeldChip(dom.id);
+        this.scene?.setDropHover({ kind: 'meld', meldId: dom.id });
+      } else {
+        this.clearMeldHighlight();
+        this.scene?.setDropHover(this.scene?.dropTargetAt(x, y) ?? null);
+      }
     } else {
       this.clearMeldHighlight();
-      this.setZoneHot(null);
-      this.reorderDuringDrag(id, x);
+      this.scene?.setDropHover(null);
+      this.reorderDuringDrag(id, x); // 手札帯内は並び替え
     }
     this.layoutFan({ id, x, y });
-  }
-
-  // 2つのゾーン矩形（左=捨てる / 右=メルド公開）をドラッグ帯に生成して表示する。
-  private showDropzones(): void {
-    const zones = this.dropzonesEl;
-    if (!zones || !this.handEl) return;
-    clear(zones);
-    const topbar = this.overlay.querySelector('.topbar') as HTMLElement | null;
-    const y2 = this.handEl.getBoundingClientRect().top - 8;
-    let y1 = (topbar ? topbar.getBoundingClientRect().bottom : 64) + 10;
-    if (y2 - y1 < 130) y1 = Math.max(64, y2 - 160);
-    const W = window.innerWidth;
-    const cx = W / 2;
-    const mk = (cls: string, left: number, width: number, icon: string, label: string): HTMLElement => {
-      const z = el('div', { class: `zone ${cls}` }, [
-        el('div', { class: 'ic', text: icon }),
-        el('div', { class: 'lb', text: label }),
-      ]);
-      z.style.left = `${left}px`;
-      z.style.top = `${y1}px`;
-      z.style.width = `${width}px`;
-      z.style.height = `${Math.max(80, y2 - y1)}px`;
-      return z;
-    };
-    zones.append(
-      mk('discard', 8, cx - 8 - 6, '🗑', '捨てる'),
-      mk('meld', cx + 6, W - (cx + 6) - 8, '🎴', 'メルド公開'),
-    );
-    zones.classList.add('show');
-  }
-
-  private updateDropzones(id: string, x: number, y: number): void {
-    const v = this.lastView;
-    if (!v) return;
-    const card = v.hand.find((c) => cardId(c) === id);
-    const meld = card ? this.meldTargetAt(card, x, y) : null;
-    if (meld) {
-      this.highlightMeldChip(meld.id);
-      this.setZoneHot(null);
-      return;
-    }
-    this.clearMeldHighlight();
-    const hot = x < window.innerWidth / 2 ? 'discard' : 'meld';
-    this.setZoneHot(hot);
-  }
-
-  private setZoneHot(which: 'discard' | 'meld' | null): void {
-    this.dropzonesEl?.querySelectorAll('.zone').forEach((z) => {
-      z.classList.toggle('hot', which != null && z.classList.contains(which));
-    });
-  }
-
-  private hideDropzones(): void {
-    this.clearMeldHighlight();
-    if (this.dropzonesEl) {
-      this.dropzonesEl.classList.remove('show');
-      clear(this.dropzonesEl);
-    }
   }
 
   private highlightMeldChip(meldId: number): void {
@@ -866,52 +840,53 @@ export class GameUI {
     this.overlay.querySelectorAll('.meld.drop-over').forEach((n) => n.classList.remove('drop-over'));
   }
 
-  // 付け札対象メルドを、2D の .meld チップ（DOM 当たり判定）と 3D 卓上メルド（レイキャスト）から特定。
-  private meldTargetAt(card: Card, x: number, y: number): Meld | null {
+  // 2D メルドチップ（右上パネル展開時のみ DOM 存在）への付け札当たり判定。折畳み時は 0 矩形で不成立→3Dへ委譲（E9）。
+  private domMeldAt(card: Card, x: number, y: number): Meld | null {
     const v = this.lastView;
     if (!v || !this.canPlayNow()) return null;
     const me = this.driver!.currentPlayerId();
-    if (!v.melds.some((m) => m.owner === me)) return null; // 自メルド未公開なら付け札不可
-    // 2D チップ
+    if (!v.melds.some((m) => m.owner === me)) return null;
     for (const node of Array.from(this.overlay.querySelectorAll('.meld'))) {
       const mid = (node as HTMLElement).dataset.meldId;
       if (!mid) continue;
       const r = (node as HTMLElement).getBoundingClientRect();
+      if (r.width === 0) continue;
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
         const meld = v.melds.find((m) => String(m.id) === mid);
         if (meld && canAttach(meld, card)) return meld;
       }
     }
-    // 3D 卓上メルド（レイキャスト）
-    const mid3 = this.scene?.meldIdAt(x, y);
-    if (mid3 != null) {
-      const meld = v.melds.find((m) => m.id === mid3);
-      if (meld && canAttach(meld, card)) return meld;
-    }
     return null;
   }
 
-  // ドロップ確定: 付け札 > ゾーン（捨てる/メルド公開）。プレイゾーン外は false（並び替え扱い）。
+  // ドロップ確定: 2Dメルドチップ > 3D標的（メルド > 捨て札 > 場）。卓外/手札帯は false（並び替え扱い・E6）。
   private resolveDrop(id: string, x: number, y: number): boolean {
     const v = this.lastView;
     if (!v || !this.canPlayNow()) return false;
     const card = v.hand.find((c) => cardId(c) === id);
     if (!card) return false;
     const me = this.driver!.currentPlayerId();
-    // 1) 付け札（2D/3D メルドへのドロップ）
-    const meld = this.meldTargetAt(card, x, y);
-    if (meld) {
-      void this.dispatch({ type: 'attach', player: me, meldId: meld.id, card }, () => this.selected.clear());
-      return true;
-    }
-    // 2) ゾーン判定（プレイゾーン内のみ）
     const handTop = this.handEl!.getBoundingClientRect().top;
     if (y >= handTop - 6) return false; // 手札帯内 = 並び替え
-    if (x < window.innerWidth / 2) {
+    // 1) 2D メルドチップ（パネル展開時の付け札導線）
+    const dom = this.domMeldAt(card, x, y);
+    if (dom) {
+      void this.dispatch({ type: 'attach', player: me, meldId: dom.id, card }, () => this.selected.clear());
+      return true;
+    }
+    // 2) 3D 卓上の標的
+    const target = this.scene?.dropTargetAt(x, y) ?? null;
+    if (!target) return false; // 卓外へのドロップ = 取り消し
+    if (target.kind === 'meld') {
+      // 付け札可否はエンジンが検証（不可なら拒否 Result → toast）。UI は独自ルール判定を持たない（E7）。
+      void this.dispatch({ type: 'attach', player: me, meldId: target.meldId, card }, () => this.selected.clear());
+      return true;
+    }
+    if (target.kind === 'discard') {
       void this.dispatch({ type: 'discard', player: me, card }, () => this.selected.clear());
       return true;
     }
-    // メルド公開ゾーン: 選択集合があればそれを、無ければ単札を公開（エンジンが妥当性検証）
+    // 場 = メルド公開（選択集合があればそれを、無ければ単札。エンジンが妥当性検証）
     const sel = this.selectedCards(v);
     const cards = this.selected.has(id) && sel.length >= 1 ? sel : [card];
     void this.publishMeld(cards);

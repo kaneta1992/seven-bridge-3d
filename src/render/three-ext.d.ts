@@ -14,6 +14,10 @@ declare module 'three' {
   export class BufferAttribute { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Float32BufferAttribute { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class RingGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class Plane { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class Sprite { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class SpriteMaterial { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class Material { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class PointLight { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class PMREMGenerator { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class WebGLRenderTarget { [k: string]: AnyX; constructor(...a: AnyX[]); }

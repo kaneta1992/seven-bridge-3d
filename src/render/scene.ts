@@ -21,6 +21,15 @@ const HAND_SPACING = 0.52;
 const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
 const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延）
 const MAX_RINGS = 5; // 光輪（ショックウェーブ）の同時上限
+const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の中心（update と一致）
+const DISCARD_R = 0.62; // 捨て札ドロップ判定の半径（山札 +0.5 と干渉しない大きさ）
+const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓外＝取り消し）
+
+// 3D 卓上のドロップ標的（契約05項目1）。手札カードのドラッグ先を screen→3D で判定する。
+export type DropTarget =
+  | { kind: 'discard' }
+  | { kind: 'field' }
+  | { kind: 'meld'; meldId: number };
 
 interface CardObj {
   id: string;
@@ -81,6 +90,27 @@ export class TableScene {
   private ringGeo!: THREE.RingGeometry;
   private rings: { mesh: THREE.Mesh; t: number; dur: number; r0: number; r1: number }[] = [];
 
+  // 3D ドロップ標的の視覚化（契約05項目1）: 捨て札リング・場（公開）リング・付け札メルドの光枠。
+  private tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(TABLE_TOP_Y + 0.04));
+  private dropActive = false;
+  private discardRing!: THREE.Mesh;
+  private fieldRing!: THREE.Mesh;
+  private meldRingGeo!: THREE.RingGeometry;
+  private activeMeldRings: THREE.Mesh[] = [];
+  private dropRings: {
+    mesh: THREE.Mesh;
+    kind: 'discard' | 'field' | 'meld';
+    meldId?: number;
+    hot: boolean;
+  }[] = [];
+  private viewYou = 0; // 現手番（=自席）インデックス。場リングの配置に使う。
+
+  // 席名ビルボードラベル（契約05項目2）: Canvas テクスチャの Sprite（常にカメラ正対）。
+  private labels = new Map<
+    number,
+    { sprite: THREE.Sprite; tex: THREE.CanvasTexture; mat: THREE.SpriteMaterial; key: string }
+  >();
+
   constructor(container: HTMLElement) {
     this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -135,6 +165,7 @@ export class TableScene {
     this.particles.addTo(this.scene);
 
     this.buildEnvironment();
+    this.buildDropIndicators();
 
     if (this.quality.bloom) {
       this.postfx = createPostFX(
@@ -359,6 +390,7 @@ export class TableScene {
 
   update(view: PlayerView): void {
     this.seatCount = view.seats.length;
+    this.viewYou = view.youIndex;
     const now = performance.now();
     const seatIndexById = new Map<string, number>();
     view.seats.forEach((s) => seatIndexById.set(s.id, s.index));
@@ -484,6 +516,7 @@ export class TableScene {
     // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る）
     const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
     this.setActiveSeat(curSeat);
+    this.updateLabels(view); // 席名ビルボード（手番強調はテクスチャ再生成で反映）
     this.wake();
   }
 
@@ -558,6 +591,198 @@ export class TableScene {
       if (typeof mid === 'number') return mid;
     }
     return null;
+  }
+
+  // ---- 3D ドロップ標的（契約05項目1: 直接D&D） -----------------------------
+
+  private buildDropIndicators(): void {
+    const mk = (rInner: number, rOuter: number, color: string): THREE.Mesh => {
+      const geo = new THREE.RingGeometry(rInner, rOuter, 48);
+      const mat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.rotation.x = -Math.PI / 2;
+      m.position.y = TABLE_TOP_Y + 0.06;
+      m.renderOrder = 8;
+      m.visible = false;
+      this.scene.add(m);
+      return m;
+    };
+    this.discardRing = mk(0.5, 0.66, '#ffd873'); // 捨てる = 金（2D 時代の配色を踏襲）
+    this.discardRing.position.set(DISCARD_C.x, TABLE_TOP_Y + 0.06, DISCARD_C.z);
+    this.fieldRing = mk(0.62, 0.8, '#37e08a'); // メルド公開 = 緑
+    this.meldRingGeo = new THREE.RingGeometry(0.34, 0.46, 40); // 付け札光枠（メルドごとに材質を持つ）
+  }
+
+  /** ドラッグ開始時に全ドロップ先を同時に光らせる（E5: どこに落とすか一目で分かる）。 */
+  showDropTargets(attachMeldIds: number[]): void {
+    this.clearMeldRings();
+    this.dropRings = [];
+    this.discardRing.visible = true;
+    this.dropRings.push({ mesh: this.discardRing, kind: 'discard', hot: false });
+    // 場（公開）リングは現手番席のメルドゾーンへ置く（公開カードが出る場所と一致）。
+    const dir = this.seatDir(this.viewYou);
+    this.fieldRing.position.copy(dir).multiplyScalar(SEAT_R * 0.62);
+    this.fieldRing.position.y = TABLE_TOP_Y + 0.06;
+    this.fieldRing.visible = true;
+    this.dropRings.push({ mesh: this.fieldRing, kind: 'field', hot: false });
+    for (const id of attachMeldIds) {
+      const c = this.meldCentroid(id);
+      if (!c) continue;
+      const mat = new THREE.MeshBasicMaterial({
+        color: '#66f0b4',
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      });
+      const ring = new THREE.Mesh(this.meldRingGeo, mat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(c.x, TABLE_TOP_Y + 0.09, c.z);
+      ring.renderOrder = 8;
+      this.scene.add(ring);
+      this.activeMeldRings.push(ring);
+      this.dropRings.push({ mesh: ring, kind: 'meld', meldId: id, hot: false });
+    }
+    this.dropActive = true;
+    this.wake();
+  }
+
+  /** ホバー中の標的だけを強調（拡大＋不透明度アップ）。 */
+  setDropHover(target: DropTarget | null): void {
+    for (const r of this.dropRings) {
+      r.hot =
+        target != null &&
+        r.kind === target.kind &&
+        (target.kind !== 'meld' || r.meldId === target.meldId);
+    }
+    this.wake();
+  }
+
+  hideDropTargets(): void {
+    this.dropActive = false;
+    this.discardRing.visible = false;
+    this.fieldRing.visible = false;
+    (this.discardRing.material as THREE.MeshBasicMaterial).opacity = 0;
+    (this.fieldRing.material as THREE.MeshBasicMaterial).opacity = 0;
+    this.clearMeldRings();
+    this.dropRings = [];
+    this.wake();
+  }
+
+  private clearMeldRings(): void {
+    for (const m of this.activeMeldRings) {
+      this.scene.remove(m);
+      (m.material as THREE.Material).dispose();
+    }
+    this.activeMeldRings = [];
+  }
+
+  private meldCentroid(meldId: number): THREE.Vector3 | null {
+    const acc = new THREE.Vector3();
+    let n = 0;
+    for (const obj of this.known.values()) {
+      if (obj.meldId === meldId && !obj.removing) {
+        acc.add(obj.targetPos);
+        n++;
+      }
+    }
+    return n === 0 ? null : acc.multiplyScalar(1 / n);
+  }
+
+  /** クライアント座標のドロップ標的を返す。優先順: メルド > 捨て札 > 場（E3: 重なり時）。 */
+  dropTargetAt(clientX: number, clientY: number): DropTarget | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.camera);
+    // 1) メルド（レイキャスト）
+    const groups: THREE.Object3D[] = [];
+    for (const obj of this.known.values()) {
+      if (obj.meldId != null && !obj.removing) groups.push(obj.group);
+    }
+    if (groups.length) {
+      const hits = this.raycaster.intersectObjects(groups, true);
+      for (const hit of hits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o && o.userData?.meldId == null) o = o.parent;
+        const mid = o?.userData?.meldId;
+        if (typeof mid === 'number') return { kind: 'meld', meldId: mid };
+      }
+    }
+    // 2) 卓天板との交点から 捨て札 / 場 を判定（カメラ・リサイズに自動追従＝E3）
+    const pt = this.raycaster.ray.intersectPlane(this.tablePlane, TMP_HIT);
+    if (!pt) return null;
+    if (Math.hypot(pt.x, pt.z) > TABLE_R) return null; // 卓外 = 取り消し（E6）
+    if (Math.hypot(pt.x - DISCARD_C.x, pt.z - DISCARD_C.z) < DISCARD_R) return { kind: 'discard' };
+    return { kind: 'field' };
+  }
+
+  // ---- 席名ビルボードラベル（契約05項目2） ---------------------------------
+
+  private updateLabels(view: PlayerView): void {
+    const n = view.seats.length;
+    for (const seat of view.seats) {
+      const key = `${seat.name}|${seat.isCurrent ? 1 : 0}`;
+      let L = this.labels.get(seat.index);
+      if (!L) {
+        const tex = this.makeLabelTexture(seat.name, seat.isCurrent);
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
+        const sprite = new THREE.Sprite(mat);
+        this.scene.add(sprite);
+        L = { sprite, tex, mat, key };
+        this.labels.set(seat.index, L);
+      } else if (L.key !== key) {
+        L.tex.dispose();
+        L.tex = this.makeLabelTexture(seat.name, seat.isCurrent);
+        L.mat.map = L.tex;
+        L.mat.needsUpdate = true;
+        L.key = key;
+      }
+      const dir = this.seatDir(seat.index);
+      L.sprite.position.copy(dir).multiplyScalar(SEAT_R * 1.12);
+      L.sprite.position.y = TABLE_TOP_Y + 0.72;
+      const s = seat.isCurrent ? 1.18 : 1.0;
+      L.sprite.scale.set(1.3 * s, 0.46 * s, 1);
+      L.sprite.visible = true;
+    }
+    // 席数が減った場合（次ゲームの人数変更等）は余ったラベルを隠す
+    for (const [idx, L] of this.labels) if (idx >= n) L.sprite.visible = false;
+  }
+
+  private makeLabelTexture(name: string, current: boolean): THREE.CanvasTexture {
+    const W = 256;
+    const H = 88;
+    const cv = document.createElement('canvas');
+    cv.width = W;
+    cv.height = H;
+    const ctx = cv.getContext('2d')!;
+    ctx.clearRect(0, 0, W, H);
+    const pad = 8;
+    const r = 20;
+    roundRectPath(ctx, pad, pad, W - 2 * pad, H - 2 * pad, r);
+    ctx.fillStyle = current ? 'rgba(216,161,58,0.94)' : 'rgba(14,22,33,0.86)';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = current ? 'rgba(255,236,170,0.98)' : 'rgba(120,160,210,0.55)';
+    ctx.stroke();
+    ctx.fillStyle = current ? '#201603' : '#eef3fa';
+    ctx.font = '700 34px system-ui, "Hiragino Kaku Gothic ProN", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ellipsize(ctx, name || '?', W - 44), W / 2, H / 2 + 1);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    return tex;
   }
 
   private syncBackPool(
@@ -786,6 +1011,17 @@ export class TableScene {
     // パーティクル
     if (this.particles.update(dt)) fxBusy = true;
 
+    // 3D ドロップ標的の脈動（ドラッグ中のみ・ホバー標的は強調）
+    if (this.dropActive) {
+      const puls = 0.34 + 0.22 * (0.5 + 0.5 * Math.sin(now * 0.005));
+      for (const r of this.dropRings) {
+        const mat = r.mesh.material as THREE.MeshBasicMaterial;
+        mat.opacity = r.hot ? 0.95 : puls;
+        r.mesh.scale.setScalar(r.hot ? 1.16 : 1.0);
+      }
+      fxBusy = true;
+    }
+
     // 描画（Bloom があればコンポーザ経由）
     if (this.postfx) this.postfx.render();
     else this.renderer.render(this.scene, this.camera);
@@ -834,6 +1070,15 @@ export class TableScene {
     }
     this.rings.length = 0;
     this.ringGeo.dispose?.();
+    // ドロップ標的・席名ラベル（Canvas テクスチャは traverse が解放しないため明示 dispose・E8）
+    this.clearMeldRings();
+    this.meldRingGeo?.dispose?.();
+    for (const L of this.labels.values()) {
+      this.scene.remove(L.sprite);
+      L.tex.dispose();
+      L.mat.dispose();
+    }
+    this.labels.clear();
     this.particles.dispose();
     this.postfx?.dispose();
     this.postfx = null;
@@ -873,9 +1118,30 @@ export class TableScene {
 }
 
 const TMP_A = new THREE.Vector3(); // ループ内の一時ベクトル（毎フレームの new を避ける）
+const TMP_HIT = new THREE.Vector3(); // dropTargetAt の交点用（ポインタ処理とループは同時実行されない）
 
 function hashId(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) & 0xffff;
   return h;
+}
+
+/** 角丸矩形のパスを引く（ラベル背景用）。 */
+function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+/** 幅 maxW に収まるよう末尾を省略（…）する。長い名前でも破綻しない（項目2）。 */
+function ellipsize(ctx: CanvasRenderingContext2D, text: string, maxW: number): string {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let s = text;
+  while (s.length > 1 && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1);
+  return s + '…';
 }
