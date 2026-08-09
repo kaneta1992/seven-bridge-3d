@@ -32,6 +32,7 @@ src/ui/      日本語UI（app.ts lobby.ts room.ts scoreTable.ts styles.css）
 - **trystero**: `joinRoom({appId, password: code}, code)` — password はルームコード（公開値）でE2E暗号化するだけ。機密ではない（機密スキャンで偽陽性になる）
 - **鳴きウィンドウ**: 5秒。タイマー管理は権威側UI（app.ts）で、満了時に closeWindow を発行。エンジンはタイマーを持たない
 - **手札表示順**: UI層の handOrder（cardId列）が保持するローカル状態。D&D並び替え（Pointer Events・タップ選択とは8px移動閾値で判別）。エンジンの手札集合とは独立
+- **手札UI（改善R3以降）**: 自手札は**2D DOMのみ**（3Dシーンは view.hand を参照しない）。扇形配置は `layoutFan()` が絶対座標 transform で計算（DOM順でなく handCards 配列順）。フォーカス=scale1.5+持ち上げ、ドラッグ中=ポインタ追従ゴースト。D&D: 単札上方=捨て/複数選択上方=メルド公開/メルド上=付け札（単独7公開はボタンのみ）。ドラッグ中は render() 保留。山札/捨て札は卓中央±0.5
 - **3D**: アセットは全部プロシージャル（Canvasテクスチャ・RoundedBoxGeometry）。外部URL禁止（要件D7・ゲート有）。メルド配置は折り返しパッキング + カード毎の単調増加y（Z-fighting対策: 面プレーンオフセット0.006 + polygonOffset）
 - **three の型**: three@0.169 は型非同梱。src/env.d.ts の ambient shim を使用（@types/three 未導入）
 
