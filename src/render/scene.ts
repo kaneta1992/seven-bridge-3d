@@ -29,11 +29,6 @@ interface CardObj {
   spawned: boolean;
 }
 
-interface UpdateOpts {
-  selectedIds?: Set<string>;
-  attachTargets?: boolean;
-}
-
 export class TableScene {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -239,31 +234,21 @@ export class TableScene {
 
   // ---- 状態反映 -----------------------------------------------------------
 
-  update(view: PlayerView, opts: UpdateOpts = {}): void {
+  update(view: PlayerView): void {
     this.seatCount = view.seats.length;
     const now = performance.now();
-    const selected = opts.selectedIds ?? new Set<string>();
     const seatIndexById = new Map<string, number>();
     view.seats.forEach((s) => seatIndexById.set(s.id, s.index));
 
     const desired = new Set<string>();
-    const deckPos = new THREE.Vector3(0.95, TABLE_TOP_Y + 0.05, 0);
+    // 卓上の中央ゾーン再設計（改善R3 項目1・2）: 山札と捨て札を中央付近へコンパクトに寄せ、
+    // 各席のメルドゾーン（radial 方向・外周寄り）と侵食しないよう左右に小さく分ける。
+    // 山札＝中央やや右、捨て札＝中央やや左。両者の間隔を狭め視認性を上げる。
+    const deckPos = new THREE.Vector3(0.5, TABLE_TOP_Y + 0.05, 0);
 
-    // 1) 自手札（面表示・youIndex 席）
-    const handPos = this.handPositions(view.youIndex, view.hand.length);
-    view.hand.forEach((card, k) => {
-      const id = cardId(card);
-      desired.add(id);
-      const fan = (k - (view.hand.length - 1) / 2) * 0.05;
-      const q = this.flatQuat(view.youIndex, fan, true);
-      const p = handPos[k]!.clone();
-      if (selected.has(id)) {
-        // 選択カードは持ち上げ、カメラ側へ少し引く
-        p.y += 0.35;
-        p.addScaledVector(this.seatDir(view.youIndex), 0.12);
-      }
-      this.place(id, card, p, q, now, k * 45, deckPos);
-    });
+    // 1) 自手札は 3D に描画しない（改善R3 項目3）。画面下部の 2D DOM（扇形手札）のみが担当する。
+    //    他家の裏向き手札（section 4）と山札（section 5）は 3D 継続。
+    //    place() の spawn 元として deckPos を使うため、捨て札/メルドの初出カードは山札から出る演出になる。
 
     // 2) メルド（面表示）: 所有者席前に整列。メルドが増えても重ならないよう
     //    「1行の幅を超えたら中心側の段へ折り返す」パッキングで配置し、
@@ -325,8 +310,9 @@ export class TableScene {
       });
     }
 
-    // 3) 捨て札（面表示・中央散らし、決定的ジッタ）
-    const discardStart = new THREE.Vector3(-0.95, TABLE_TOP_Y, 0);
+    // 3) 捨て札（面表示・中央やや左に散らし、決定的ジッタ）。山札(+x)と近接しつつ重ならないよう
+    //    ジッタ幅を控えめにする（改善R3 項目1・2）。
+    const discardStart = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0);
     view.discardPile.forEach((card, k) => {
       const id = cardId(card);
       desired.add(id);
@@ -334,7 +320,7 @@ export class TableScene {
       const jz = (((hashId(id) / 7) | 0) % 100) / 100 - 0.5;
       const p = discardStart
         .clone()
-        .add(new THREE.Vector3(jx * 0.35, TABLE_TOP_Y + 0.03 + k * 0.008, jz * 0.35));
+        .add(new THREE.Vector3(jx * 0.28, TABLE_TOP_Y + 0.03 + k * 0.008, jz * 0.28));
       const q = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(-Math.PI / 2, jx * 0.6, 0, 'YXZ'),
       );
@@ -362,7 +348,7 @@ export class TableScene {
     const deckShown = Math.min(view.deckCount, 14);
     for (let i = 0; i < deckShown; i++) {
       backTargets.push({
-        pos: new THREE.Vector3(0.95, TABLE_TOP_Y + 0.03 + i * 0.02, 0),
+        pos: new THREE.Vector3(0.5, TABLE_TOP_Y + 0.03 + i * 0.02, 0),
         quat: new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0)),
       });
     }

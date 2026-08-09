@@ -3,7 +3,7 @@
 // 差分は driver の任意メソッド（isAuthority / claimDeadline）で吸収する。
 // エンジンには直接触れず、状態は driver.getView / claimants から受け取る（付け札の可否判定にのみ
 // 純粋関数 canAttach を利用＝ UI アフォーダンス用途で、アクションは必ず driver 経由）。
-import type { Action, Card, PlayerView } from '../core';
+import type { Action, Card, Meld, PlayerView } from '../core';
 import { canAttach, cardId } from '../core';
 import { LocalDriver } from '../driver/localDriver';
 import type { ClaimOption, GameDriver } from '../driver/types';
@@ -53,6 +53,12 @@ export class GameUI {
   // 手札ドラッグ中は driver 由来の再描画（他家アクションのスナップショット等）で .hand DOM が
   // 作り直されないよう render を保留し、pointerup/cancel 後の render() でまとめて反映する。
   private dragging = false;
+  // 扇形手札のレイアウト対象（DOM 順ではなく handCards 配列順で並べる）と、現在フォーカス中の
+  // カード（ホバー/タッチ/ドラッグ開始で手前へ拡大＝Slay the Spire 風）。
+  private handEl: HTMLElement | null = null;
+  private handCards: { id: string; el: HTMLElement }[] = [];
+  private focusedId: string | null = null;
+  private dropHint: HTMLElement | null = null;
   private lastRound = 0;
   private lastPhaseKey = '';
   private claimKey: string | null = null;
@@ -73,6 +79,7 @@ export class GameUI {
   private onResize = (): void => {
     this.scene?.resize();
     if (this.driver) this.renderScene(this.orderedView());
+    this.layoutFan(); // 扇形手札を新しいビューポート幅へ再配置
   };
 
   // ---- 画面遷移 ----------------------------------------------------------
@@ -107,6 +114,10 @@ export class GameUI {
     this.selected.clear();
     this.handOrder = [];
     this.dragging = false;
+    this.handEl = null;
+    this.handCards = [];
+    this.focusedId = null;
+    this.dropHint = null;
     this.lastRound = 0;
     this.lastPhaseKey = '';
   }
@@ -247,7 +258,7 @@ export class GameUI {
 
   private renderScene(view: PlayerView): void {
     if (!this.scene) return;
-    this.scene.update(view, { selectedIds: this.selected });
+    this.scene.update(view);
   }
 
   private render(): void {
@@ -279,6 +290,11 @@ export class GameUI {
 
   private renderHud(view: PlayerView): void {
     clear(this.overlay);
+    // overlay を作り直すため手札まわりのライブ参照を破棄（buildBottom が再登録する）。
+    this.handEl = null;
+    this.handCards = [];
+    this.dropHint = null;
+    this.focusedId = null;
     if (view.phase === 'gameOver') {
       this.overlay.append(this.buildResult(view));
       return;
@@ -292,6 +308,8 @@ export class GameUI {
       this.overlay.append(this.buildRoundOver(view));
     } else {
       this.overlay.append(this.buildBottom(view));
+      // 手札が overlay（DOM 内）へ入った後に扇形配置を確定（clientWidth 取得のため）。
+      this.layoutFan();
     }
   }
 
@@ -332,6 +350,7 @@ export class GameUI {
       const node = el('div', { class: 'meld' + (attachable ? ' attachable' : '') }, [
         el('span', { class: 'owner', text: `${nameOf(meld.owner)}·${kindLabel}` }),
       ]);
+      node.dataset.meldId = String(meld.id);
       for (const c of meld.cards) node.append(this.chip(c));
       if (attachable) {
         node.onclick = () =>
@@ -357,14 +376,18 @@ export class GameUI {
 
   private buildBottom(view: PlayerView): HTMLElement {
     const myTurn = this.isMyTurn(view);
-    const hand = el('div', { class: 'hand' });
+    // 扇形（アーチ状・重なり許容）手札。横幅を節約しつつ、タップ/ホバー/ドラッグ開始したカードを
+    // 手前へ大きくフォーカスする（改善R3 項目6）。配置は layoutFan() が絶対座標 transform で行う。
+    const hand = el('div', { class: 'hand fan' });
+    this.handEl = hand;
+    this.handCards = [];
     const canSelect = view.phase === 'awaitingDiscard' && myTurn;
     // 並び替えは自分の手札が存在する間は常時可能（他家手番・鳴きウィンドウ中も含む）。
     // 手札を整理する自然な操作を待ち時間中でも許可する。タップ選択は捨てフェーズのみ。
     const canReorder = view.hand.length > 0;
     // 自分が操作できる手番（ツモ/捨て）以外は手札を淡く見せて手番でないことを示す（並び替えは可）。
     const activeTurn = myTurn && (view.phase === 'awaitingDraw' || view.phase === 'awaitingDiscard');
-    // view.hand は既に applyHandOrder 済みの表示順で渡ってくる（3D と一致）。
+    // view.hand は既に applyHandOrder 済みの表示順で渡ってくる。
     for (const c of view.hand) {
       const id = cardId(c);
       const card = el('div', {
@@ -378,7 +401,8 @@ export class GameUI {
       card.append(el('div', { class: 'big', text: rankText(c) }));
       card.append(el('div', { text: SUIT_GLYPH[c.suit] }));
       if (!activeTurn) card.style.opacity = '0.85';
-      if (canReorder) this.attachHandPointer(card, id, hand, canSelect);
+      if (canReorder) this.attachHandPointer(card, c, view, canSelect);
+      this.handCards.push({ id, el: card });
       hand.append(card);
     }
 
@@ -417,22 +441,41 @@ export class GameUI {
     return el('div', { class: 'bottom' }, [hand, hint, actions]);
   }
 
-  // 手札カードの Pointer Events。マウス/タッチ共通で「移動閾値未満＝タップ（選択トグル）/
-  // 閾値以上＝ドラッグ（並び替え）」を判別する。並び替えは兄弟カードの中点を境に DOM を
-  // ライブ挿入し、確定時に DOM 順を handOrder へ取り込んで render() で 3D と DOM を再同期する。
-  // canReorder が真のフェーズ（自手番）でのみ張られ、そこでは driver 由来の自発 re-render が
-  // 起きないため、ドラッグ中に DOM が作り直されて競合することはない（E12/E13）。
+  // 手札カードの Pointer Events。マウス/タッチ共通。
+  // - ホバー/ポインタダウン: フォーカス（手前へ拡大＝Slay the Spire 風。項目6）
+  // - 移動閾値未満で離す = タップ（選択トグル。捨てフェーズのみ）
+  // - 閾値以上のドラッグ: 掴んだカードがポインタへ追従（ゴースト。項目4）。
+  //     手札帯より上（プレイゾーン）へ運べば「捨てる/メルド公開/付け札」（項目5）、
+  //     手札帯の中なら「並び替え」（handCards 配列を並べ替え layoutFan で反映）。
+  // canReorder が真（自手札が存在）でのみ張られ、ドラッグ中は this.dragging=true で
+  // driver 由来の自発 re-render を保留するため DOM 作り直しと競合しない。
   private attachHandPointer(
     card: HTMLElement,
-    id: string,
-    hand: HTMLElement,
+    cardObj: Card,
+    view: PlayerView,
     canSelect: boolean,
   ): void {
     const THRESHOLD = 8; // タップ/ドラッグ判別のピクセル移動閾値
+    const id = cardId(cardObj);
+    // プレイ操作（捨て/メルド/付け札）は自分の捨てフェーズのみ有効。並び替えは常時可。
+    const canPlay = view.phase === 'awaitingDiscard' && this.isMyTurn(view);
     let pointerId = -1;
     let startX = 0;
     let startY = 0;
     let dragging = false;
+
+    card.addEventListener('pointerenter', () => {
+      if (this.dragging) return;
+      this.focusedId = id;
+      this.layoutFan();
+    });
+    card.addEventListener('pointerleave', () => {
+      if (dragging || this.dragging) return;
+      if (this.focusedId === id) {
+        this.focusedId = null;
+        this.layoutFan();
+      }
+    });
 
     card.addEventListener('pointerdown', (e) => {
       if (pointerId !== -1) return; // 多重ポインタは無視
@@ -441,6 +484,8 @@ export class GameUI {
       startY = e.clientY;
       dragging = false;
       card.setPointerCapture(pointerId);
+      this.focusedId = id;
+      this.layoutFan();
     });
 
     card.addEventListener('pointermove', (e) => {
@@ -449,11 +494,20 @@ export class GameUI {
       if (!dragging) {
         dragging = true;
         card.classList.add('dragging');
-        // ドラッグ中は driver 由来の再描画を保留させる（DOM 作り直し防止）。
         this.dragging = true;
+        this.focusedId = id;
+        this.showDropHint(view);
       }
       e.preventDefault();
-      this.reorderDuringDrag(hand, card, e.clientX);
+      const handTop = this.handEl!.getBoundingClientRect().top;
+      const inPlayZone = canPlay && e.clientY < handTop - 6;
+      if (inPlayZone) {
+        this.updateDropTarget(view, cardObj, e.clientX, e.clientY);
+      } else {
+        this.clearDropTarget();
+        this.reorderDuringDrag(id, e.clientX);
+      }
+      this.layoutFan({ id, x: e.clientX, y: e.clientY });
     });
 
     const finish = (e: PointerEvent): void => {
@@ -462,42 +516,175 @@ export class GameUI {
       pointerId = -1;
       if (!dragging) {
         // タップ＝選択トグル（捨てフェーズのみ意味を持つ）
+        this.focusedId = null;
         if (canSelect) {
           if (this.selected.has(id)) this.selected.delete(id);
           else this.selected.add(id);
-          this.render();
         }
+        this.render();
         return;
       }
-      // ドラッグ確定：現在の DOM 並びを表示順として取り込み、3D/DOM を再構築で一致させる。
       card.classList.remove('dragging');
       this.dragging = false;
-      this.handOrder = Array.from(hand.children)
-        .map((n) => (n as HTMLElement).dataset.cardId)
-        .filter((v): v is string => !!v);
-      // ドラッグ中に保留された driver スナップショットも、この render() でまとめて反映される。
+      this.focusedId = null;
+      const handTop = this.handEl!.getBoundingClientRect().top;
+      const inPlayZone = canPlay && e.clientY < handTop - 6;
+      this.hideDropHint();
+      if (inPlayZone && this.handleDrop(view, cardObj, e.clientX, e.clientY)) {
+        return; // dispatch 成功 → subscribe 経由で render される
+      }
+      // 並び替え確定 or 無効ドロップのスナップバック
+      this.commitOrder();
       this.render();
     };
     card.addEventListener('pointerup', finish);
     card.addEventListener('pointercancel', finish);
   }
 
-  // ドラッグ中のカードを、兄弟カードの水平中点を基準に挿入位置へ移動する（横1列レイアウト前提）。
-  private reorderDuringDrag(hand: HTMLElement, dragEl: HTMLElement, clientX: number): void {
-    let ref: HTMLElement | null = null;
-    for (const child of Array.from(hand.children) as HTMLElement[]) {
-      if (child === dragEl) continue;
-      const rect = child.getBoundingClientRect();
-      if (clientX < rect.left + rect.width / 2) {
-        ref = child;
-        break;
+  // ドラッグ中のカードを、他カードの中心 x と比較して handCards 配列の適切な位置へ移動する。
+  private reorderDuringDrag(dragId: string, clientX: number): void {
+    const cards = this.handCards;
+    const from = cards.findIndex((c) => c.id === dragId);
+    if (from < 0) return;
+    let to = 0;
+    for (const { id, el: e } of cards) {
+      if (id === dragId) continue;
+      const r = e.getBoundingClientRect();
+      if (clientX > r.left + r.width / 2) to++;
+    }
+    to = Math.max(0, Math.min(cards.length - 1, to));
+    if (to === from) return;
+    const [item] = cards.splice(from, 1);
+    cards.splice(to, 0, item!);
+  }
+
+  // 現在の handCards 配列順を表示順（handOrder）として確定する。
+  private commitOrder(): void {
+    this.handOrder = this.handCards.map((c) => c.id);
+  }
+
+  // 扇形手札の配置。各カードを絶対座標 transform（translate+rotate）で弧状に並べ、
+  // フォーカス中カードは手前へ拡大、ドラッグ中カードはポインタへ追従させる。
+  private layoutFan(drag?: { id: string; x: number; y: number }): void {
+    const hand = this.handEl;
+    if (!hand) return;
+    const cards = this.handCards;
+    const n = cards.length;
+    if (n === 0) return;
+    const W = hand.clientWidth || hand.getBoundingClientRect().width;
+    const H = hand.clientHeight || hand.getBoundingClientRect().height;
+    const cardW = cards[0]!.el.offsetWidth || 58;
+    const cardH = cards[0]!.el.offsetHeight || 82;
+    const half = (n - 1) / 2;
+    const idealStep = cardW * 0.72;
+    const maxSpread = Math.max(cardW, W - cardW - 12);
+    const step = n > 1 ? Math.min(idealStep, maxSpread / (n - 1)) : 0;
+    const anglePer = Math.min(4, 24 / Math.max(1, n)); // 端ほど傾ける（総角度を抑制）
+    const curve = 1.1; // px/off^2（端ほど下がる扇の膨らみ）
+    const maxDrop = half * half * curve;
+    const baseTop = Math.max(2, H - cardH - maxDrop - 2);
+    const rect = drag ? hand.getBoundingClientRect() : null;
+    const fi = this.focusedId ? cards.findIndex((k) => k.id === this.focusedId) : -1;
+    cards.forEach(({ id, el: c }, i) => {
+      const off = i - half;
+      const x = W / 2 - cardW / 2 + off * step;
+      const y = baseTop + off * off * curve;
+      if (drag && id === drag.id && rect) {
+        // ポインタ追従（掴んだ感）: カード中心をポインタへ合わせる。
+        const dx = drag.x - rect.left - cardW / 2;
+        const dy = drag.y - rect.top - cardH / 2;
+        c.style.transform = `translate(${dx}px, ${dy}px) scale(1.14) rotate(0deg)`;
+        c.style.zIndex = '60';
+        return;
+      }
+      if (id === this.focusedId) {
+        c.style.transform = `translate(${x}px, ${y - cardH * 0.55}px) scale(1.5) rotate(0deg)`;
+        c.style.zIndex = '50';
+        return;
+      }
+      // フォーカス隣接カードは外側へ少し退避して被写体を見せる
+      const push = fi >= 0 && i !== fi ? (i < fi ? -1 : 1) * 14 : 0;
+      const lift = this.selected.has(id) ? -16 : 0;
+      c.style.transform = `translate(${x + push}px, ${y + lift}px) rotate(${off * anglePer}deg)`;
+      c.style.zIndex = String(10 + i);
+    });
+  }
+
+  // ---- D&D ドロップ判定・ヒント（項目5） ---------------------------------
+
+  private handleDrop(view: PlayerView, card: Card, x: number, y: number): boolean {
+    if (!(this.isMyTurn(view) && view.phase === 'awaitingDiscard')) return false;
+    const me = this.driver!.currentPlayerId();
+    const id = cardId(card);
+    // 1) 付け札: attachable なメルド上でのドロップ（単独カード）
+    const meld = this.meldUnderPoint(view, card, x, y);
+    if (meld) {
+      void this.dispatch({ type: 'attach', player: me, meldId: meld.id, card }, () => this.selected.clear());
+      return true;
+    }
+    // 2) 複数選択中カードのドラッグ → メルド公開（3枚以上）
+    const sel = this.selectedCards(view);
+    if (this.selected.has(id) && sel.length >= 3) {
+      void this.publishMeld(sel);
+      return true;
+    }
+    // 3) それ以外の単独カード → 捨てる
+    void this.dispatch({ type: 'discard', player: me, card }, () => this.selected.clear());
+    return true;
+  }
+
+  // ポインタ座標にある「付け札可能な」メルドの DOM 要素から対応 Meld を返す。
+  private meldUnderPoint(view: PlayerView, card: Card, x: number, y: number): Meld | null {
+    const me = this.driver!.currentPlayerId();
+    if (!view.melds.some((m) => m.owner === me)) return null; // 自メルド未公開なら付け札不可
+    for (const node of Array.from(this.overlay.querySelectorAll('.meld'))) {
+      const mid = (node as HTMLElement).dataset.meldId;
+      if (!mid) continue;
+      const r = (node as HTMLElement).getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        const meld = view.melds.find((m) => String(m.id) === mid);
+        if (meld && canAttach(meld, card)) return meld;
       }
     }
-    if (ref) {
-      if (dragEl.nextSibling !== ref) hand.insertBefore(dragEl, ref);
-    } else if (hand.lastElementChild !== dragEl) {
-      hand.append(dragEl);
+    return null;
+  }
+
+  private showDropHint(view: PlayerView): void {
+    if (!(this.isMyTurn(view) && view.phase === 'awaitingDiscard')) return;
+    if (!this.dropHint) {
+      this.dropHint = el('div', { class: 'drop-hint' });
+      this.overlay.append(this.dropHint);
     }
+    this.dropHint.classList.add('show');
+    this.dropHint.textContent = '上へドロップ：捨てる／メルド公開';
+  }
+
+  private updateDropTarget(view: PlayerView, card: Card, x: number, y: number): void {
+    if (!this.dropHint) return;
+    this.dropHint.classList.add('show');
+    const overMeld = this.meldUnderPoint(view, card, x, y);
+    this.overlay.querySelectorAll('.meld.drop-over').forEach((n) => n.classList.remove('drop-over'));
+    if (overMeld) {
+      for (const node of Array.from(this.overlay.querySelectorAll('.meld'))) {
+        if ((node as HTMLElement).dataset.meldId === String(overMeld.id)) node.classList.add('drop-over');
+      }
+      this.dropHint.textContent = 'ここで離す：付け札';
+    } else {
+      const sel = this.selectedCards(view);
+      this.dropHint.textContent =
+        this.selected.has(cardId(card)) && sel.length >= 3 ? 'ここで離す：メルド公開' : 'ここで離す：捨てる';
+    }
+  }
+
+  private clearDropTarget(): void {
+    this.overlay.querySelectorAll('.meld.drop-over').forEach((n) => n.classList.remove('drop-over'));
+    if (this.dropHint) this.dropHint.textContent = '上へドロップ：捨てる／メルド公開';
+  }
+
+  private hideDropHint(): void {
+    this.overlay.querySelectorAll('.meld.drop-over').forEach((n) => n.classList.remove('drop-over'));
+    this.dropHint?.remove();
+    this.dropHint = null;
   }
 
   private buildClaimPanel(view: PlayerView): HTMLElement {
