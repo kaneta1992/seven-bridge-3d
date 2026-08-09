@@ -34,3 +34,9 @@
 - DECISION: 機密スキャンは rg 不在のため grep -E ベース+自己除外に変更 — [scripts/secret-scan.sh](../scripts/secret-scan.sh)
 - DECISION: 契約01は1回目 blocked（Node.js 不在 — リトライには数えない）。ユーザー承認のもと winget で Node LTS を導入して再委譲する
 - DECISION: 初回 winget 実行はエラー1618（別MSI進行中）。msiexec 終了を監視して再試行
+- DECISION: winget が背景シェルから偽の成功(exit 0)を返す問題を確認 → ポータブルNode(v24.19.0, SHA256検証済み)を ~/tools に導入。ハーネス新規シェルにPATHが乗らないため契約に export 手順を明記
+- DECISION: 契約01 L3 PASS(minor5件、computeTotals export のみ即修正) / 契約02 L3 PASS(minor5件中3件を修正ラウンド1で対応) / 契約03 L3 PASS(minor3件は見送り)
+- DECISION: 契約02修正ラウンド1で SendMessage 継続と新規スポーンが並走する事故 → 新規側が検証専任に自主転換し無事統合。以後、継続エージェントの生死判定は git status とトランスクリプト末尾で確認してから再委譲する
+- DECISION: 機密スキャンの password ヒット2回は trystero API 引数(公開ルームコード)と説明文書で、いずれも白確認の上コミット
+- DECISION: ユーザー要望の追加2件（モバイル縦画面 / 手札D&D並び替え）を要件§3.2に追記し実装済み。D&Dは実装者判断の「自手番限定」を「常時可能」へ改善指示（待ち時間の手札整理がトランプの自然な行動のため）
+- DECISION: リポジトリ kaneta1992/seven-bridge-3d (public) を gh で作成、Pages は build_type=workflow で有効化
