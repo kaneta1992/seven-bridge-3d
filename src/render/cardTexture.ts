@@ -23,6 +23,16 @@ export function setMaxAnisotropy(value: number): void {
   maxAniso = Math.max(1, value);
 }
 
+/** キャッシュ済みカードテクスチャを破棄しキャッシュを空にする（シーン破棄時）。 */
+export function disposeCardTextures(): void {
+  for (const t of faceCache.values()) t.dispose();
+  faceCache.clear();
+  if (backCache) {
+    backCache.dispose();
+    backCache = null;
+  }
+}
+
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
   ctx.moveTo(x + r, y);

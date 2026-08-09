@@ -43,3 +43,11 @@ export function feltTexture(): THREE.Texture {
   feltCache = tex;
   return tex;
 }
+
+/** フェルトテクスチャを破棄しキャッシュを空にする（シーン破棄時）。 */
+export function disposeFelt(): void {
+  if (feltCache) {
+    feltCache.dispose();
+    feltCache = null;
+  }
+}

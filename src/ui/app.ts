@@ -157,9 +157,14 @@ export class GameUI {
     const nameOf = (id: string): string => view.seats.find((s) => s.id === id)?.name ?? '?';
     const sel = this.selectedCards(view);
     const attachCard = sel.length === 1 ? sel[0]! : null;
+    // 付け札は自分がメルドを1つ以上公開済みでなければ不可（要件§2.3）。
+    // 未公開プレイヤーには付け札UI（ハイライト・タップ受付）を出さない。
+    const meId = this.driver!.currentPlayerId();
+    const hasOwnMeld = view.melds.some((m) => m.owner === meId);
 
     for (const meld of view.melds) {
-      const attachable = attachCard != null && view.phase === 'awaitingDiscard' && canAttach(meld, attachCard);
+      const attachable =
+        hasOwnMeld && attachCard != null && view.phase === 'awaitingDiscard' && canAttach(meld, attachCard);
       const kindLabel = meld.kind === 'lone7' ? '単独7' : meld.kind === 'group' ? '組' : '列';
       const node = el('div', { class: 'meld' + (attachable ? ' attachable' : '') }, [
         el('span', { class: 'owner', text: `${nameOf(meld.owner)}·${kindLabel}` }),
@@ -226,8 +231,10 @@ export class GameUI {
           : sel.length === 1
             ? '「捨てる」で手番終了、または場のメルドをタップして付け札。'
             : '「メルド公開」で選択カードを役として公開。';
+      // 公開可能な形は「単独7の1枚」または「3枚以上」のみ（2枚選択などは無効）。
+      const canPublishSel = (sel.length === 1 && sel[0]!.rank === 7) || sel.length >= 3;
       const meldBtn = el('button', { text: 'メルド公開' }) as HTMLButtonElement;
-      meldBtn.disabled = sel.length === 0;
+      meldBtn.disabled = !canPublishSel;
       meldBtn.onclick = () => void this.publishMeld(sel);
       const discardBtn = el('button', { class: 'gold', text: '捨てる' }) as HTMLButtonElement;
       discardBtn.disabled = sel.length !== 1;

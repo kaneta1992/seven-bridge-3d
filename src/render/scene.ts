@@ -4,10 +4,10 @@
 // 即時テレポートを避ける（要件§3.2）。ジオメトリ/マテリアルは共有し draw call を抑制（E5）。
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import type { Card, PlayerView } from '../core';
+import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
-import { backTexture, faceTexture, setMaxAnisotropy } from './cardTexture';
-import { feltTexture } from './felt';
+import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
+import { disposeFelt, feltTexture } from './felt';
 
 const CARD_W = 0.72;
 const CARD_H = 1.0;
@@ -87,7 +87,15 @@ export class TableScene {
 
     this.bodyGeo = new RoundedBoxGeometry(CARD_W, CARD_H, CARD_D, 4, 0.06);
     this.planeGeo = new THREE.PlaneGeometry(CARD_W * 0.98, CARD_H * 0.98);
-    this.bodyMat = new THREE.MeshStandardMaterial({ color: '#f2efe6', roughness: 0.55, metalness: 0.0 });
+    this.bodyMat = new THREE.MeshStandardMaterial({
+      color: '#f2efe6',
+      roughness: 0.55,
+      metalness: 0.0,
+      // 本体を深度方向へ僅かに後退させ、面テクスチャ平面が常に手前で描画される（Z-fighting 対策）
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
     this.backMat = new THREE.MeshStandardMaterial({ map: backTexture(), roughness: 0.5, metalness: 0.05 });
 
     this.buildEnvironment();
@@ -182,12 +190,12 @@ export class TableScene {
 
     const back = new THREE.Mesh(this.planeGeo, this.backMat);
     back.rotation.y = Math.PI;
-    back.position.z = -(CARD_D / 2 + 0.002);
+    back.position.z = -(CARD_D / 2 + 0.006); // 本体面から十分に離し共面を避ける
     g.add(back);
 
     if (card) {
       const front = new THREE.Mesh(this.planeGeo, this.frontMat(card));
-      front.position.z = CARD_D / 2 + 0.002;
+      front.position.z = CARD_D / 2 + 0.006;
       g.add(front);
     }
     return g;
@@ -221,7 +229,7 @@ export class TableScene {
       const p = anchor
         .clone()
         .addScaledVector(tangent, t * HAND_SPACING)
-        .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.03 + k * 0.001, 0))
+        .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.04 + k * 0.004, 0))
         // 手前ほど中心から少し離す（扇の膨らみ）
         .addScaledVector(dir, -Math.abs(t) * 0.03);
       out.push(p);
@@ -257,27 +265,63 @@ export class TableScene {
       this.place(id, card, p, q, now, k * 45, deckPos);
     });
 
-    // 2) メルド（面表示・所有者席寄り）
-    const meldsByOwner = new Map<number, number>();
+    // 2) メルド（面表示）: 所有者席前に整列。メルドが増えても重ならないよう
+    //    「1行の幅を超えたら中心側の段へ折り返す」パッキングで配置し、
+    //    全メルドカードへ単調増加の微小 y を与えて共面（Z-fighting）を防ぐ。
+    const meldsBySeat = new Map<number, Meld[]>();
     for (const meld of view.melds) {
       const seat = seatIndexById.get(meld.owner) ?? view.youIndex;
+      const arr = meldsBySeat.get(seat) ?? [];
+      arr.push(meld);
+      meldsBySeat.set(seat, arr);
+    }
+    const CARD_STEP = 0.34; // メルド内カード間隔（適度な重なり）
+    const MELD_GAP = 0.42; // メルド間の余白
+    const ROW_PITCH = 0.64; // 折り返し段の半径方向ピッチ
+    // 席数が多いほど隣席と干渉しないよう1行の幅を狭める
+    const rowBudget = this.seatCount >= 5 ? 1.9 : this.seatCount === 4 ? 2.5 : 3.1;
+    const widthOf = (m: Meld): number => Math.max(1, m.cards.length) * CARD_STEP;
+    let ySeq = 0; // 全メルドカード通し番号（y 段差用）
+    for (const [seat, melds] of meldsBySeat) {
       const dir = this.seatDir(seat);
       const tangent = new THREE.Vector3(-dir.z, 0, dir.x);
-      const slot = meldsByOwner.get(seat) ?? 0;
-      meldsByOwner.set(seat, slot + 1);
-      const rowAnchor = dir
-        .clone()
-        .multiplyScalar(SEAT_R * 0.52)
-        .addScaledVector(tangent, (slot - 1) * 0.95);
-      meld.cards.forEach((card, k) => {
-        const id = cardId(card);
-        desired.add(id);
-        const t = k - (meld.cards.length - 1) / 2;
-        const p = rowAnchor
-          .clone()
-          .addScaledVector(tangent, t * 0.28)
-          .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.03, 0));
-        this.place(id, card, p, this.flatQuat(seat, 0, true), now, 0, deckPos);
+      // メルドを行に貪欲パッキング
+      const rows: Meld[][] = [];
+      let row: Meld[] = [];
+      let rowW = 0;
+      for (const m of melds) {
+        const w = widthOf(m);
+        if (row.length && rowW + MELD_GAP + w > rowBudget) {
+          rows.push(row);
+          row = [];
+          rowW = 0;
+        }
+        rowW += (row.length ? MELD_GAP : 0) + w;
+        row.push(m);
+      }
+      if (row.length) rows.push(row);
+
+      rows.forEach((rowMelds, r) => {
+        const total =
+          rowMelds.reduce((s, m) => s + widthOf(m), 0) + MELD_GAP * (rowMelds.length - 1);
+        const radial = SEAT_R * 0.62 - r * ROW_PITCH;
+        let cursor = -total / 2; // 行左端の接線座標
+        for (const meld of rowMelds) {
+          const w = widthOf(meld);
+          meld.cards.forEach((card, k) => {
+            const id = cardId(card);
+            desired.add(id);
+            const tan = cursor + (k + 0.5) * CARD_STEP;
+            const p = dir
+              .clone()
+              .multiplyScalar(radial)
+              .addScaledVector(tangent, tan)
+              .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.05 + ySeq * 0.006, 0));
+            ySeq++;
+            this.place(id, card, p, this.flatQuat(seat, 0, true), now, 0, deckPos);
+          });
+          cursor += w + MELD_GAP;
+        }
       });
     }
 
@@ -490,6 +534,32 @@ export class TableScene {
 
   dispose(): void {
     cancelAnimationFrame(this.raf);
+    this.running = false;
+
+    // シーングラフ上の全ジオメトリ/マテリアルを解放（卓・縁・床・カード等）
+    this.scene.traverse((obj: { geometry?: { dispose?: () => void }; material?: unknown }) => {
+      obj.geometry?.dispose?.();
+      const mat = obj.material;
+      if (mat) {
+        const mats = Array.isArray(mat) ? mat : [mat];
+        for (const m of mats as { dispose?: () => void }[]) m.dispose?.();
+      }
+    });
+
+    // 共有リソース（シーン未追加のプールも含めて明示的に解放）
+    this.bodyGeo.dispose?.();
+    this.planeGeo.dispose?.();
+    this.bodyMat.dispose?.();
+    this.backMat.dispose?.();
+    for (const m of this.frontMatCache.values()) m.dispose?.();
+    this.frontMatCache.clear();
+    // モジュールキャッシュのテクスチャを破棄しクリア（次シーンで再生成される）
+    disposeCardTextures();
+    disposeFelt();
+
+    this.known.clear();
+    this.backPool.length = 0;
+
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);
