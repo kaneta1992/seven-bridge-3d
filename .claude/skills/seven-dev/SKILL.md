@@ -54,6 +54,12 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 - scene.ts は視覚上の共面回避に y 微差を多用。カード配置をいじるときは distinctY を壊さないこと
 - ドラッグ中の再描画競合: 並び替え実装はドラッグ中の driver 再描画を保留する設計（詳細は app.ts の attachHandPointer 周辺コメント）
 
+## 演出レイヤ（R5以降）
+- `src/render/particles.ts`（プール制・1種別1drawコールのShaderMaterial粒子）/ `postfx.ts`（EffectComposer+Bloom、失敗時素renderフォールバック）/ `quality.ts`（モバイル自動品質: DPR/Bloom/影/粒子キャップ）
+- `src/ui/callout.ts`（大型コールアウト・バナー・カウントアップ）/ `audio.ts`（WebAudioプロシージャルSFX・ミュート永続）
+- 演出はビュー差分から横断検出（スナップショット非依存＝通信対戦でも整合）。prefers-reduced-motion 尊重
+- **並行編集の教訓（3回発生）**: 実装サブエージェントを2体同時に同一ツリーへ触らせない。SendMessage再開エージェントの「完了」通知はターン間停止でも発火するため、**status行つき最終報告のみを完了と見なす**。二重化が疑われたら TaskStop で確定停止。将来は worktree 隔離を推奨
+
 ## デプロイ
 - GitHub Actions（.github/workflows/deploy.yml）: push → npm ci/test/build → Pages。
 - リポジトリ: kaneta1992 アカウント（gh CLI 認証済み）。Pages は build_type=workflow
