@@ -15,6 +15,8 @@ import {
 import { NetSession } from '../net/session';
 import { createTrysteroTransport } from '../net/trysteroTransport';
 import { TableScene } from '../render/scene';
+import { AudioKit } from './audio';
+import { Callouts, countUp } from './callout';
 import { clear, el } from './dom';
 import { renderLobby, type CreateRoomConfig, type LobbyResult } from './lobby';
 import { renderConnecting, renderNotice, renderWaitingRoom } from './room';
@@ -83,6 +85,18 @@ export class GameUI {
   private closing = false;
   private toastEl: HTMLElement | null = null;
   private toastTimer = 0;
+  // 演出（ジューシー化ラウンド）: SFX・コールアウト・イベント検出用の直近状態
+  private audio: AudioKit | null = null;
+  private callouts: Callouts | null = null;
+  private vignetteEl: HTMLElement | null = null;
+  private fxTimers: number[] = [];
+  private evRound = -1;
+  private prevMeldIds = new Set<number>();
+  private prevCurrentSeat = -1;
+  private prevDiscardCount = -1;
+  private lastClaimCard: Card | null = null;
+  private celebratedRound = -1;
+  private celebratedGameOver = false;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -125,6 +139,20 @@ export class GameUI {
     this.scene = null;
     this.driver?.dispose?.();
     this.driver = null;
+    this.callouts?.dispose();
+    this.callouts = null;
+    this.audio?.dispose();
+    this.audio = null;
+    this.vignetteEl = null;
+    for (const t of this.fxTimers) clearTimeout(t);
+    this.fxTimers = [];
+    this.evRound = -1;
+    this.prevMeldIds = new Set();
+    this.prevCurrentSeat = -1;
+    this.prevDiscardCount = -1;
+    this.lastClaimCard = null;
+    this.celebratedRound = -1;
+    this.celebratedGameOver = false;
     this.stopClaimTimer();
     this.clearDrawTimers();
     this.selected.clear();
@@ -244,8 +272,13 @@ export class GameUI {
     this.bottomEl = el('div', { class: 'bottom' }, [this.handEl, this.footerEl]);
     this.dropzonesEl = el('div', { class: 'dropzones' });
     this.toastEl = el('div', { class: 'toast' });
-    this.root.append(this.sceneHost, this.overlay, this.dropzonesEl, this.bottomEl, this.toastEl);
+    this.vignetteEl = el('div', { class: 'vignette' }); // 画面周縁を落とす映画的ビネット（3D品質）
+    this.root.append(this.sceneHost, this.vignetteEl, this.overlay, this.dropzonesEl, this.bottomEl, this.toastEl);
     this.attachHandContainer(this.handEl);
+
+    // SFX とコールアウト層。コールアウトは overlay とは別に root 直下へ（最前面・pointer 透過）。
+    this.audio = new AudioKit();
+    this.callouts = new Callouts(this.root);
 
     this.scene = new TableScene(this.sceneHost);
     this.driver = driver;
@@ -311,6 +344,10 @@ export class GameUI {
       this.lastRound = view.round;
       this.selected.clear();
       this.handOrder = [];
+      // 配札のリズミカルな効果音（3D 側のスタッガ配札に同期）
+      for (let i = 0; i < 12; i++) {
+        this.fxTimers.push(window.setTimeout(() => this.audio?.deal(i), i * 45));
+      }
     }
     // フェーズ/手番が変わったら選択解除
     const phaseKey = `${view.phase}:${view.youIndex}:${view.round}`;
@@ -324,9 +361,91 @@ export class GameUI {
     this.detectDraw(oview);
     this.lastView = oview;
     this.renderScene(oview);
+    this.handleEvents(view); // 演出イベント検出（メルド/鳴き/手番交代/上がり）はビュー差分から判定
     this.renderHud(oview);
     this.updateBottom(oview);
     this.syncClaimTimer(oview);
+  }
+
+  // ビュー差分からゲームイベントを検出し、3D エフェクト・コールアウト・SFX を発火する。
+  // アクションの発生源（自分/他家/スナップショット）に依存しない横断的検出（E2: 進行を阻害しない）。
+  private handleEvents(view: PlayerView): void {
+    if (!this.scene) return;
+    const seatIndexById = new Map(view.seats.map((s) => [s.id, s.index] as const));
+    const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
+
+    // ラウンドが変わったら検出基準をリセット（前ラウンドのメルドIDや手番で誤発火しないように）
+    if (view.round !== this.evRound) {
+      this.evRound = view.round;
+      this.prevMeldIds = new Set(view.melds.map((m) => m.id));
+      this.prevCurrentSeat = curSeat;
+      this.prevDiscardCount = view.discardPile.length;
+      this.lastClaimCard = null;
+    }
+
+    // 鳴きウィンドウ中は対象の捨て札を控えておく（新メルドがポン/チーか公開かの判別に使う）
+    if (view.phase === 'meldWindow' && view.claimWindow) {
+      this.lastClaimCard = view.claimWindow.card;
+    }
+
+    // 新規メルド → 鳴き（ポン/チー）か自主公開かを判別して決め演出
+    for (const m of view.melds) {
+      if (this.prevMeldIds.has(m.id)) continue;
+      const seat = seatIndexById.get(m.owner) ?? curSeat;
+      const claimCard = this.lastClaimCard;
+      const isClaim = claimCard != null && m.cards.some((c) => cardId(c) === cardId(claimCard));
+      if (isClaim) {
+        const kind: 'pon' | 'chi' = m.kind === 'sequence' ? 'chi' : 'pon';
+        this.scene.claimEffect(seat, kind);
+        this.callouts?.show(kind === 'pon' ? 'ポン！' : 'チー！', kind);
+        if (kind === 'pon') this.audio?.pon();
+        else this.audio?.chi();
+      } else {
+        this.scene.publishEffect(seat);
+        this.callouts?.show('メルド！', 'meld');
+        this.audio?.meld();
+      }
+    }
+    this.prevMeldIds = new Set(view.melds.map((m) => m.id));
+    if (view.phase !== 'meldWindow') this.lastClaimCard = null;
+
+    // 捨て札が増えた → 捨て音
+    if (this.prevDiscardCount >= 0 && view.discardPile.length > this.prevDiscardCount) {
+      this.audio?.discard();
+    }
+    this.prevDiscardCount = view.discardPile.length;
+
+    // 手番交代バナー（通常プレイ中のみ・鳴き受付や配札待ちでは出さない）
+    if (
+      this.prevCurrentSeat >= 0 &&
+      curSeat !== this.prevCurrentSeat &&
+      (view.phase === 'awaitingDraw' || view.phase === 'awaitingDiscard')
+    ) {
+      const name = view.seats.find((s) => s.index === curSeat)?.name ?? '';
+      this.callouts?.showBanner(`${name} さんの手番`);
+      this.audio?.turn();
+    }
+    this.prevCurrentSeat = curSeat;
+
+    // 上がり / 流局（ラウンド終了）のセレブレーション（ラウンドごとに1回）
+    if (view.phase === 'roundOver' && this.celebratedRound !== view.round) {
+      this.celebratedRound = view.round;
+      if (view.lastWinner) {
+        const seat = seatIndexById.get(view.lastWinner) ?? curSeat;
+        this.scene.celebrate(seat);
+        this.callouts?.show('上がり！', 'win');
+        this.audio?.win();
+      } else {
+        this.callouts?.show('流局', 'draw-round');
+      }
+    }
+    // ゲーム終了の大団円（1回）
+    if (view.phase === 'gameOver' && !this.celebratedGameOver) {
+      this.celebratedGameOver = true;
+      this.scene.celebrate(view.youIndex);
+      this.callouts?.show('ゲーム終了！', 'go');
+      this.audio?.win();
+    }
   }
 
   // overlay（上部HUD・メルド・鳴き・モーダル）のみを作り直す。手札は永続コンテナで別管理（項目3）。
@@ -356,11 +475,21 @@ export class GameUI {
           : `${current?.name ?? '-'} さんの手番`;
     const scoreBtn = el('button', { text: 'スコア票' });
     scoreBtn.onclick = () => this.openScoreModal(view);
+    const muteBtn = el('button', {
+      class: 'icon',
+      text: this.audio?.isMuted() ? '🔇' : '🔊',
+      title: '効果音のオン/オフ',
+    });
+    muteBtn.onclick = () => {
+      const m = this.audio?.toggleMute();
+      muteBtn.textContent = m ? '🔇' : '🔊';
+    };
     return el('div', { class: 'topbar' }, [
       el('span', { class: 'turn', text: turnText }),
       el('span', { class: 'spacer' }),
       el('span', { class: 'pill', text: `ラウンド ${view.round}/${view.totalRounds}` }),
       el('span', { class: 'pill', text: `山札 ${view.deckCount}` }),
+      muteBtn,
       scoreBtn,
     ]);
   }
@@ -808,6 +937,7 @@ export class GameUI {
     this.clearDrawTimers();
     this.drawnId = id;
     this.drawnBig = true;
+    this.audio?.draw();
     this.drawTimers.push(
       window.setTimeout(() => {
         this.drawnBig = false;
@@ -961,11 +1091,14 @@ export class GameUI {
         prev = p.total;
       }
       const win = view.finalWinners.includes(p.id);
+      const num = el('span', { text: '0' });
+      const pill = el('span', { class: 'pill' }, [num, ' 点'] as unknown as (Node | string)[]);
+      countUp(num, p.total, 700 + i * 120); // 順位ごとに少し遅らせてカウントアップ（スコア票の高揚感）
       modal.append(
         el('div', { class: 'rank' + (win ? ' win' : '') }, [
           el('span', { class: 'pos', text: `${pos}位` }),
           el('span', { class: 'nm', text: p.name + (win ? ' 👑' : '') }),
-          el('span', { class: 'pill', text: `${p.total} 点` }),
+          pill,
         ]),
       );
     });
@@ -1024,6 +1157,7 @@ export class GameUI {
   }
 
   private async dispatch(action: Action, onOk?: () => void): Promise<void> {
+    this.audio?.click(); // ボタン/操作の即時フィードバック音
     const r = await this.driver!.dispatch(action);
     if (r.ok) onOk?.();
     else this.toast(this.friendlyError(action, r.error));
@@ -1068,7 +1202,12 @@ export class GameUI {
 
   private tickClaim(): void {
     const remain = Math.max(0, this.claimDeadline - performance.now());
-    if (this.timerBar) this.timerBar.style.width = `${(remain / CLAIM_WINDOW_MS) * 100}%`;
+    if (this.timerBar) {
+      this.timerBar.style.width = `${(remain / CLAIM_WINDOW_MS) * 100}%`;
+      // 残り時間わずかで緊張演出（パネルのパルス + タイマー赤化）
+      const panel = this.timerBar.closest('.claim');
+      panel?.classList.toggle('urgent', remain < 1600);
+    }
     // ウィンドウ満了の確定は権威者のみ（ゲストはホストの closeWindow 配信を待つ）。
     if (remain <= 0 && !this.closing && (this.driver!.isAuthority?.() ?? true)) {
       this.closing = true;

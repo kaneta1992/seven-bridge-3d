@@ -8,6 +8,9 @@ import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
 import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
 import { disposeFelt, feltTexture } from './felt';
+import { ParticleSystem } from './particles';
+import { createPostFX, type PostFX } from './postfx';
+import { detectQuality, type QualityTier } from './quality';
 
 const CARD_W = 0.72;
 const CARD_H = 1.0;
@@ -16,6 +19,8 @@ const TABLE_TOP_Y = 0;
 const SEAT_R = 2.55; // 席の半径
 const HAND_SPACING = 0.52;
 const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
+const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延）
+const MAX_RINGS = 5; // 光輪（ショックウェーブ）の同時上限
 
 interface CardObj {
   id: string;
@@ -61,15 +66,30 @@ export class TableScene {
   private idle = 0;
   private container: HTMLElement;
 
+  // 演出まわり（ジューシー化ラウンド）
+  private quality: QualityTier = detectQuality();
+  private particles: ParticleSystem;
+  private postfx: PostFX | null = null;
+  private envMap: THREE.Texture | null = null;
+  private spot!: THREE.SpotLight;
+  private spotPos = new THREE.Vector3(0, 9, 0.5);
+  private spotTarget = new THREE.Vector3(0, 0, 0);
+  private spotPosGoal = new THREE.Vector3(0, 9, 0.5);
+  private spotTargetGoal = new THREE.Vector3(0, 0, 0);
+  private camKick = 0; // カメラパンチの残量（減衰）
+  private freshDeal = false; // clearCards 直後の一括配札（スタッガ演出）
+  private ringGeo!: THREE.RingGeometry;
+  private rings: { mesh: THREE.Mesh; t: number; dur: number; r0: number; r1: number }[] = [];
+
   constructor(container: HTMLElement) {
     this.container = container;
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.quality.maxDpr));
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = 1.12;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
     this.renderer.domElement.style.display = 'block';
@@ -77,26 +97,91 @@ export class TableScene {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0a1018');
-    this.scene.fog = new THREE.Fog('#0a1018', 9, 20);
+    this.scene.fog = new THREE.Fog('#080d14', 9, 22);
+    if (this.quality.envMap) {
+      this.envMap = this.buildEnvMap();
+      this.scene.environment = this.envMap;
+    }
 
     this.camera = new THREE.PerspectiveCamera(45, this.aspect(), 0.1, 100);
     this.camera.position.copy(this.camPos);
 
     this.bodyGeo = new RoundedBoxGeometry(CARD_W, CARD_H, CARD_D, 4, 0.06);
     this.planeGeo = new THREE.PlaneGeometry(CARD_W * 0.98, CARD_H * 0.98);
-    this.bodyMat = new THREE.MeshStandardMaterial({
-      color: '#f2efe6',
-      roughness: 0.55,
+    // カード本体は MeshPhysicalMaterial の clearcoat でラミネート加工の艶を出す（3D品質）。
+    this.bodyMat = new THREE.MeshPhysicalMaterial({
+      color: '#f4f1e8',
+      roughness: 0.5,
       metalness: 0.0,
+      clearcoat: 0.6,
+      clearcoatRoughness: 0.28,
+      envMapIntensity: 0.35,
       // 本体を深度方向へ僅かに後退させ、面テクスチャ平面が常に手前で描画される（Z-fighting 対策）
       polygonOffset: true,
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 1,
     });
-    this.backMat = new THREE.MeshStandardMaterial({ map: backTexture(), roughness: 0.5, metalness: 0.05 });
+    this.backMat = new THREE.MeshPhysicalMaterial({
+      map: backTexture(),
+      roughness: 0.42,
+      metalness: 0.05,
+      clearcoat: 0.5,
+      clearcoatRoughness: 0.3,
+      envMapIntensity: 0.4,
+    });
+
+    this.ringGeo = new THREE.RingGeometry(0.86, 1.0, 48);
+    this.particles = new ParticleSystem(this.quality.sparkCap, this.quality.confettiCap, this.particleScale());
+    this.particles.addTo(this.scene);
 
     this.buildEnvironment();
+
+    if (this.quality.bloom) {
+      this.postfx = createPostFX(
+        this.renderer,
+        this.scene,
+        this.camera,
+        Math.max(1, container.clientWidth),
+        Math.max(1, container.clientHeight),
+      );
+      if (this.postfx) this.postfx.setSize(container.clientWidth, container.clientHeight, this.renderer.getPixelRatio());
+    }
+
     this.wake();
+  }
+
+  /** パーティクルの gl_PointSize スケール（描画高さ×DPR に比例させ、縦横で見た目を一定に保つ）。 */
+  private particleScale(): number {
+    const h = Math.max(1, this.container.clientHeight) * this.renderer.getPixelRatio();
+    return h * 0.9;
+  }
+
+  /** 反射用の簡易な等角環境マップ（プロシージャル・外部アセットなし）。clearcoat に映り込みを与える。 */
+  private buildEnvMap(): THREE.Texture {
+    const w = 256;
+    const h = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d')!;
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, '#39506e'); // 上: 冷たい天井光
+    g.addColorStop(0.42, '#243244');
+    g.addColorStop(0.5, '#7d8ea6'); // 水平帯: ソフトなスタジオ光
+    g.addColorStop(0.58, '#1a2430');
+    g.addColorStop(1, '#0a0f16'); // 下: 暗い床
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+    // 天頂付近に淡い光源を1つ置き、艶に映り込むハイライトを作る
+    const spot = ctx.createRadialGradient(w * 0.5, h * 0.22, 2, w * 0.5, h * 0.22, 46);
+    spot.addColorStop(0, 'rgba(255,244,220,0.9)');
+    spot.addColorStop(1, 'rgba(255,244,220,0)');
+    ctx.fillStyle = spot;
+    ctx.fillRect(0, 0, w, h);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
   }
 
   /** 補間ループを起動（settle 後は自動停止するため、状態変化のたびに呼ぶ）。 */
@@ -116,14 +201,15 @@ export class TableScene {
   }
 
   private buildEnvironment(): void {
-    // 環境光・半球光・キーライト（影）・スポット（ドラマ）
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x24301f, 0.5));
+    // 3灯構成（キー+リム+フィル）+ 半球/環境光 + 手番スポット。豪華なスタジオライティング。
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.42));
+    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x24301f, 0.55));
 
-    const key = new THREE.DirectionalLight(0xfff4e0, 1.3);
+    const key = new THREE.DirectionalLight(0xfff4e0, 1.35);
     key.position.set(3.5, 8, 4);
     key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
+    const sm = this.quality.shadowMap;
+    key.shadow.mapSize.set(sm, sm);
     key.shadow.camera.near = 1;
     key.shadow.camera.far = 25;
     const d = 7;
@@ -132,22 +218,50 @@ export class TableScene {
     key.shadow.camera.top = d;
     key.shadow.camera.bottom = -d;
     key.shadow.bias = -0.0004;
+    key.shadow.radius = 3;
     this.scene.add(key);
 
-    const spot = new THREE.SpotLight(0xffffff, 40, 20, Math.PI / 5, 0.6, 1.4);
-    spot.position.set(0, 9, 0.5);
-    spot.target.position.set(0, 0, 0);
-    this.scene.add(spot);
-    this.scene.add(spot.target);
+    // リムライト（冷色・背後から）: カード/縁の輪郭を際立たせ立体感を出す
+    const rimLight = new THREE.DirectionalLight(0x88b4ff, 0.7);
+    rimLight.position.set(-4, 5.5, -5);
+    this.scene.add(rimLight);
 
-    // 卓（フェルト天板 + 木縁）
-    const feltMat = new THREE.MeshStandardMaterial({ map: feltTexture(), roughness: 0.9, metalness: 0.0 });
+    // フィルライト（弱・正面下から影を柔らかく）
+    const fill = new THREE.DirectionalLight(0xffe9cf, 0.3);
+    fill.position.set(-2, 3, 6);
+    this.scene.add(fill);
+
+    // 手番スポット: 現手番席の上へ移動して照らす（誰の番かを光で示す）
+    this.spot = new THREE.SpotLight(0xfff6e8, 46, 22, Math.PI / 6, 0.55, 1.3);
+    this.spot.position.copy(this.spotPos);
+    this.spot.target.position.copy(this.spotTarget);
+    this.spot.castShadow = false;
+    this.scene.add(this.spot);
+    this.scene.add(this.spot.target);
+
+    // 卓（フェルト天板 + 木縁）。フェルトは sheen で布の質感、木縁は clearcoat で艶。
+    const feltMat = new THREE.MeshPhysicalMaterial({
+      map: feltTexture(),
+      roughness: 0.92,
+      metalness: 0.0,
+      sheen: 0.7,
+      sheenRoughness: 0.85,
+      sheenColor: new THREE.Color('#2f8f5a'),
+      envMapIntensity: 0.25,
+    });
     const top = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 3.5, 0.3, 72), feltMat);
     top.position.y = TABLE_TOP_Y - 0.15;
     top.receiveShadow = true;
     this.scene.add(top);
 
-    const rimMat = new THREE.MeshStandardMaterial({ color: '#5a3a21', roughness: 0.6, metalness: 0.15 });
+    const rimMat = new THREE.MeshPhysicalMaterial({
+      color: '#5a3a21',
+      roughness: 0.45,
+      metalness: 0.2,
+      clearcoat: 0.7,
+      clearcoatRoughness: 0.35,
+      envMapIntensity: 0.6,
+    });
     const rim = new THREE.Mesh(new THREE.TorusGeometry(3.5, 0.16, 24, 80), rimMat);
     rim.rotation.x = Math.PI / 2;
     rim.position.y = TABLE_TOP_Y;
@@ -172,7 +286,14 @@ export class TableScene {
     const key = cardId(card);
     let m = this.frontMatCache.get(key);
     if (!m) {
-      m = new THREE.MeshStandardMaterial({ map: faceTexture(card), roughness: 0.5, metalness: 0.02 });
+      m = new THREE.MeshPhysicalMaterial({
+        map: faceTexture(card),
+        roughness: 0.42,
+        metalness: 0.02,
+        clearcoat: 0.55,
+        clearcoatRoughness: 0.25,
+        envMapIntensity: 0.4,
+      });
       this.frontMatCache.set(key, m);
     }
     return m;
@@ -354,10 +475,25 @@ export class TableScene {
         quat: new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0)),
       });
     }
-    this.syncBackPool(backTargets, now);
+    const dealing = this.freshDeal;
+    this.freshDeal = false;
+    this.syncBackPool(backTargets, now, dealing, deckPos);
 
     // カメラを現手番（=youIndex）席の背後へ演出移動
     this.aimCameraAt(view.youIndex);
+    // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る）
+    const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
+    this.setActiveSeat(curSeat);
+    this.wake();
+  }
+
+  /** 手番スポットの照射先を指定席へ移す（誰の番かを光で示す・E3 では縦画面でも卓中央寄りに収まる）。 */
+  private setActiveSeat(seatIndex: number): void {
+    const dir = this.seatDir(seatIndex);
+    this.spotTargetGoal.copy(dir).multiplyScalar(SEAT_R * 0.7);
+    this.spotTargetGoal.y = 0;
+    this.spotPosGoal.copy(dir).multiplyScalar(SEAT_R * 0.5);
+    this.spotPosGoal.y = 8.5;
     this.wake();
   }
 
@@ -376,6 +512,7 @@ export class TableScene {
       const group = this.buildCard(card);
       group.position.copy(spawnPos);
       group.quaternion.copy(quat);
+      group.scale.setScalar(0.55); // 出現ポップ（loop で 1 へイージング）
       this.scene.add(group);
       obj = {
         id,
@@ -426,6 +563,8 @@ export class TableScene {
   private syncBackPool(
     targets: { pos: THREE.Vector3; quat: THREE.Quaternion }[],
     now: number,
+    dealing: boolean,
+    deckPos: THREE.Vector3,
   ): void {
     // 必要数までプール拡張
     while (this.backPool.length < targets.length) {
@@ -448,8 +587,18 @@ export class TableScene {
       if (i < targets.length) {
         if (!obj.group.visible) {
           obj.group.visible = true;
-          obj.group.position.copy(targets[i]!.pos);
-          obj.group.quaternion.copy(targets[i]!.quat);
+          if (dealing) {
+            // 配札演出: 山札からリズミカルに1枚ずつ飛び出す（loop が delay 経過後に補間開始）
+            obj.group.position.copy(deckPos);
+            obj.group.quaternion.copy(targets[i]!.quat);
+            obj.born = now;
+            obj.delay = i * DEAL_STEP_MS;
+          } else {
+            obj.group.position.copy(targets[i]!.pos);
+            obj.group.quaternion.copy(targets[i]!.quat);
+            obj.born = now;
+            obj.delay = 0;
+          }
         }
         obj.targetPos.copy(targets[i]!.pos);
         obj.targetQuat.copy(targets[i]!.quat);
@@ -457,6 +606,71 @@ export class TableScene {
         obj.group.visible = false;
       }
     });
+  }
+
+  // ---- 演出 API（app.ts のイベント検出から呼ばれる） -----------------------
+
+  /** 席前の卓上ワールド座標（メルド/鳴きの発火点）。 */
+  private seatSpot(seatIndex: number, radialK = 0.55): THREE.Vector3 {
+    const dir = this.seatDir(seatIndex);
+    return dir.clone().multiplyScalar(SEAT_R * radialK).setY(TABLE_TOP_Y + 0.12);
+  }
+
+  /** メルド公開の決め演出: 金色スパーク + 光輪 + 軽いカメラパンチ。 */
+  publishEffect(seatIndex: number): void {
+    const p = this.seatSpot(seatIndex);
+    this.particles.burst(p, { count: 30, color: [1, 0.82, 0.36], speed: 2.4, size: 0.1, life: 0.75 });
+    this.spawnRing(p, '#ffd873');
+    this.cameraPunch(0.5);
+    this.wake();
+  }
+
+  /** ポン/チーの鳴き演出: 種別で色分けしたスパーク + 光輪 + 強めのカメラパンチ。 */
+  claimEffect(seatIndex: number, kind: 'pon' | 'chi'): void {
+    const p = this.seatSpot(seatIndex);
+    const color: [number, number, number] = kind === 'pon' ? [1, 0.45, 0.3] : [0.4, 0.72, 1];
+    this.particles.burst(p, { count: 40, color, speed: 3.0, size: 0.12, life: 0.8, spread: 1 });
+    this.spawnRing(p, kind === 'pon' ? '#ff7a4d' : '#66b6ff');
+    this.cameraPunch(0.85);
+    this.wake();
+  }
+
+  /** 上がり/ラウンド終了のセレブレーション: 卓上に紙吹雪噴水 + 金スパーク + カメラパンチ。 */
+  celebrate(seatIndex: number): void {
+    const p = this.seatSpot(seatIndex, 0.4);
+    const fountain = new THREE.Vector3(0, TABLE_TOP_Y + 0.2, 0);
+    this.particles.confettiFountain(fountain, Math.min(this.quality.confettiCap, 240));
+    this.particles.burst(p, { count: 44, color: [1, 0.9, 0.5], speed: 3.2, size: 0.13, life: 1.1 });
+    this.spawnRing(p, '#ffe08a');
+    this.cameraPunch(1.0);
+    this.wake();
+  }
+
+  /** カメラのドリーパンチ（減衰）。reduced-motion 時はシェイクを伴わない（quality.cameraShake）。 */
+  cameraPunch(intensity: number): void {
+    this.camKick = Math.max(this.camKick, intensity);
+    this.wake();
+  }
+
+  private spawnRing(pos: THREE.Vector3, color: string): void {
+    if (this.rings.length >= MAX_RINGS) {
+      const old = this.rings.shift();
+      if (old) this.scene.remove(old.mesh);
+    }
+    const mat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(this.ringGeo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.copy(pos);
+    mesh.renderOrder = 9;
+    this.scene.add(mesh);
+    this.rings.push({ mesh, t: 0, dur: 0.55, r0: 0.2, r1: 2.6 });
   }
 
   private aimCameraAt(seatIndex: number): void {
@@ -481,6 +695,7 @@ export class TableScene {
     const now = performance.now();
     let motion = 0; // 残り移動量の指標（settle 判定用）
     let busy = false; // 退場アニメ等で継続が必要か
+    let fxBusy = false; // 粒子/光輪/カメラパンチ等の演出が継続中か
 
     // カメラ補間
     motion += this.camPos.distanceTo(this.camPosGoal) + this.camTarget.distanceTo(this.camTargetGoal);
@@ -489,13 +704,43 @@ export class TableScene {
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camTarget);
 
-    // 既知カード補間 + 退場処理
+    // カメラパンチ（ドリーイン + 任意シェイク）。減衰して settle へ戻る。
+    if (this.camKick > 0.001) {
+      const toTarget = TMP_A.subVectors(this.camTarget, this.camPos).normalize();
+      this.camera.position.addScaledVector(toTarget, this.camKick * 0.32);
+      if (this.quality.cameraShake) {
+        this.camera.position.x += (Math.random() - 0.5) * this.camKick * 0.14;
+        this.camera.position.y += (Math.random() - 0.5) * this.camKick * 0.14;
+      }
+      this.camera.lookAt(this.camTarget);
+      this.camKick *= Math.exp(-9 * dt);
+      if (this.camKick < 0.02) this.camKick = 0;
+      fxBusy = true;
+    }
+
+    // 手番スポットの追従
+    motion += this.spotPos.distanceTo(this.spotPosGoal) + this.spotTarget.distanceTo(this.spotTargetGoal);
+    this.spotPos.lerp(this.spotPosGoal, k * 0.5);
+    this.spotTarget.lerp(this.spotTargetGoal, k * 0.5);
+    this.spot.position.copy(this.spotPos);
+    this.spot.target.position.copy(this.spotTarget);
+    this.spot.target.updateMatrixWorld?.();
+
+    // 既知カード補間 + 出現ポップ + 退場処理
     for (const [id, obj] of this.known) {
       if (now - obj.born >= obj.delay) {
         obj.spawned = true;
         motion += obj.group.position.distanceTo(obj.targetPos);
         obj.group.position.lerp(obj.targetPos, k);
         obj.group.quaternion.slerp(obj.targetQuat, k);
+        if (!obj.removing) {
+          const s = obj.group.scale.x;
+          if (s < 0.999) {
+            const ns = s + (1 - s) * k;
+            obj.group.scale.setScalar(ns);
+            motion += 1 - s;
+          }
+        }
       } else {
         busy = true; // 配札ディレイ待ち
       }
@@ -509,18 +754,45 @@ export class TableScene {
         }
       }
     }
-    // 裏カード補間
+    // 裏カード補間（配札スタッガの delay を尊重）
     for (const obj of this.backPool) {
       if (!obj.group.visible) continue;
+      if (now - obj.born < obj.delay) {
+        busy = true;
+        continue;
+      }
       motion += obj.group.position.distanceTo(obj.targetPos);
       obj.group.position.lerp(obj.targetPos, k);
       obj.group.quaternion.slerp(obj.targetQuat, k);
     }
 
-    this.renderer.render(this.scene, this.camera);
+    // 光輪（ショックウェーブ）: 拡大しながらフェードアウト
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const r = this.rings[i]!;
+      r.t += dt;
+      const u = r.t / r.dur;
+      if (u >= 1) {
+        this.scene.remove(r.mesh);
+        (r.mesh.material as { dispose?: () => void }).dispose?.();
+        this.rings.splice(i, 1);
+        continue;
+      }
+      const ease = 1 - (1 - u) * (1 - u); // easeOutQuad
+      r.mesh.scale.setScalar(r.r0 + (r.r1 - r.r0) * ease);
+      r.mesh.material.opacity = 0.85 * (1 - u);
+      fxBusy = true;
+    }
 
-    // settle したら次ラウンド/操作まで RAF を停止（省電力・E5 / スクショ可能化）
-    if (motion < 0.004 && !busy) this.idle++;
+    // パーティクル
+    if (this.particles.update(dt)) fxBusy = true;
+
+    // 描画（Bloom があればコンポーザ経由）
+    if (this.postfx) this.postfx.render();
+    else this.renderer.render(this.scene, this.camera);
+
+    // settle したら次ラウンド/操作まで RAF を停止（省電力・E5 / スクショ可能化）。
+    // 演出（fxBusy）継続中は idle させない（E10: 演出終了で確実に settle する）。
+    if (motion < 0.004 && !busy && !fxBusy) this.idle++;
     else this.idle = 0;
     if (this.idle > 4) {
       this.running = false;
@@ -532,24 +804,42 @@ export class TableScene {
   resize(): void {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const dpr = Math.min(window.devicePixelRatio || 1, this.quality.maxDpr);
+    this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h);
     this.camera.aspect = this.aspect();
     this.camera.updateProjectionMatrix();
+    this.postfx?.setSize(w, h, this.renderer.getPixelRatio());
+    this.particles.setScale(this.particleScale());
     this.wake();
   }
 
-  /** ラウンド切り替え等でカードを全消去（次の update で再構築）。 */
+  /** ラウンド切り替え等でカードを全消去（次の update で再構築＝配札スタッガ演出）。 */
   clearCards(): void {
     for (const [, obj] of this.known) this.scene.remove(obj.group);
     this.known.clear();
     for (const obj of this.backPool) obj.group.visible = false;
+    this.freshDeal = true;
     this.wake();
   }
 
   dispose(): void {
     cancelAnimationFrame(this.raf);
     this.running = false;
+
+    // 演出資源（コンテキストロスト対策・E11）: 光輪 → パーティクル → コンポーザ → 環境マップ
+    for (const r of this.rings) {
+      this.scene.remove(r.mesh);
+      (r.mesh.material as { dispose?: () => void }).dispose?.();
+    }
+    this.rings.length = 0;
+    this.ringGeo.dispose?.();
+    this.particles.dispose();
+    this.postfx?.dispose();
+    this.postfx = null;
+    this.envMap?.dispose?.();
+    this.envMap = null;
+    this.scene.environment = null;
 
     // シーングラフ上の全ジオメトリ/マテリアルを解放（卓・縁・床・カード等）
     this.scene.traverse((obj: { geometry?: { dispose?: () => void }; material?: unknown }) => {
@@ -581,6 +871,8 @@ export class TableScene {
     }
   }
 }
+
+const TMP_A = new THREE.Vector3(); // ループ内の一時ベクトル（毎フレームの new を避ける）
 
 function hashId(id: string): number {
   let h = 0;
