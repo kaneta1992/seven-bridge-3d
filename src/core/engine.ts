@@ -305,7 +305,13 @@ export function applyAction(prev: GameState, action: Action): ActionResult {
       if (state.round >= state.totalRounds) return fail('startRound: all rounds finished');
 
       state.round += 1;
-      state.dealerIndex = (state.round - 1) % n;
+      // 親の決定: 初回はルーム順先頭。以降は直前ラウンドの勝者が親。流局(lastWinner=null)は親継続。
+      if (state.round === 1) {
+        state.dealerIndex = 0;
+      } else if (state.lastWinner !== null) {
+        const w = playerIndexOf(state.lastWinner);
+        if (w >= 0) state.dealerIndex = w;
+      }
       const { result, seed } = shuffle(orderedDeck(), state.rng);
       state.rng = seed;
       for (let i = 0; i < n; i++) {

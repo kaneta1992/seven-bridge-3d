@@ -37,16 +37,33 @@ describe('配札とディーラー移動 (E1: 2人/6人境界・最初のツモ�
     expect(s.players.every((p) => p.hand.length === 7)).toBe(true);
   });
 
-  it('ディーラーはラウンドごとに時計回りへ移動', () => {
+  it('直前ラウンドの勝者が次の親になる（ユーザー指定ルール）', () => {
     const g = createGame({ players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }], seed: 5 });
     let s = ok(g, { type: 'startRound' });
     expect(s.dealerIndex).toBe(0);
-    // ラウンド確定を模して次ラウンドを開始
+    // c が上がったことにして次ラウンドを開始
     s.phase = 'roundOver';
+    s.lastWinner = 'c';
     s = ok(s, { type: 'startRound' });
     expect(s.round).toBe(2);
+    expect(s.dealerIndex).toBe(2); // 勝者 c が親
+    expect(s.currentPlayerIndex).toBe(0); // 親の左隣から
+  });
+
+  it('流局（lastWinner=null）では親が継続する', () => {
+    const g = createGame({ players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }], seed: 5 });
+    let s = ok(g, { type: 'startRound' });
+    // 2ラウンド目: b が勝者 → 親は b
+    s.phase = 'roundOver';
+    s.lastWinner = 'b';
+    s = ok(s, { type: 'startRound' });
     expect(s.dealerIndex).toBe(1);
-    expect(s.currentPlayerIndex).toBe(2);
+    // 3ラウンド目: 流局 → 親は b のまま
+    s.phase = 'roundOver';
+    s.lastWinner = null;
+    s = ok(s, { type: 'startRound' });
+    expect(s.round).toBe(3);
+    expect(s.dealerIndex).toBe(1);
   });
 
   it('シード付きで配札は決定的 (E6)', () => {
