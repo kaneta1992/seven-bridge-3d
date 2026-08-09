@@ -24,3 +24,13 @@
 
 ## 未決事項（質問1ラウンド目で解消予定）
 - 通信方式 / ジョーカー / 点数計算 / 鳴き後の手番 / git・GitHub操作の許可
+
+## DECISION 記録
+- DECISION: 通信=Trystero サーバーレスP2P — ユーザー選択（2026-08-09）
+- DECISION: ジョーカーなし・失点 A=1/2〜10=額面/J=11/Q=12/K=13 — ユーザー指定
+- DECISION: 鳴き後は麻雀式（鳴いた人に手番・ポン優先） — ユーザー選択
+- DECISION: git/GitHub 全許可（init・コミット・gh repo作成・push・Pages有効化） — ユーザー承認（セッション初回確認済み）
+- DECISION: 実装フェーズは 01エンジン → 02 3D+UI → 03通信+統合 の直列3契約 — 検証資源（同一作業ツリー）共有のため並列化しない
+- DECISION: 機密スキャンは rg 不在のため grep -E ベース+自己除外に変更 — [scripts/secret-scan.sh](../scripts/secret-scan.sh)
+- DECISION: 契約01は1回目 blocked（Node.js 不在 — リトライには数えない）。ユーザー承認のもと winget で Node LTS を導入して再委譲する
+- DECISION: 初回 winget 実行はエラー1618（別MSI進行中）。msiexec 終了を監視して再試行

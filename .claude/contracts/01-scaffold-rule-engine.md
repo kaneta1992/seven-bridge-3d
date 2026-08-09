@@ -36,13 +36,20 @@
 - テスト・フィクスチャに実在の個人情報を使わない（プレイヤー名はダミー）
 - diff 上限: 3500行（新規プロジェクトのため。node_modules / package-lock.json は計測から除外）
 
+## 環境ノート（2026-08-09 追記 — この追記が既存記述に優先する）
+- Node.js はポータブル版が `C:\Users\kanet\tools\node-v24.19.0-win-x64` に導入済み（v24.19.0 / npm 11.17.0）
+- **新規シェルの PATH には載っていない**。node/npm を使う全コマンドの先頭で必ず PATH を通すこと:
+  - bash: `export PATH="$PATH:/c/Users/kanet/tools/node-v24.19.0-win-x64"`
+  - PowerShell: `$env:Path += ';C:\Users\kanet\tools\node-v24.19.0-win-x64'`
+
 ## 合格基準（全て実行し、コマンドと exit code を報告に含めること）
-- 実行シェル: bash（作業ディレクトリ `C:/Users/kanet/seven`）
+- 実行シェル: bash（作業ディレクトリ `C:/Users/kanet/seven`、上記 export を前置）
 - `npm run build`
 - `npm run typecheck`
 - `npm test`（vitest run — 要件 §4 の必須テスト項目を全て含み全グリーン）
-- `rg "from ['\"]three|from ['\"]trystero" src/core; test $? -eq 1`（コアの純粋性 [ゲート]）
-- `rg "document\.|window\." src/core; test $? -eq 1`（コアのDOM非依存 [ゲート]）
+- `git grep --untracked -E "from ['\"]three|from ['\"]trystero" -- src/core; test $? -eq 1`（コアの純粋性 [ゲート]）
+- `git grep --untracked -E "\bdocument\.|\bwindow\." -- src/core; test $? -eq 1`（コアのDOM非依存 [ゲート]）
+- 注意: この環境の bash に `rg` は無い。grep 系は `git grep --untracked -E` か POSIX `grep -E` を使うこと
 
 ## 出力契約
 最終報告は日本語で、以下のみ。全体で30行以内。

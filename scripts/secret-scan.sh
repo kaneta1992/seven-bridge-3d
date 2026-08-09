@@ -6,7 +6,7 @@ set -u
 hits=0
 DIFF_PATHS=(-- . ':(exclude)scripts/secret-scan.sh')
 
-KW='api[_-]?key|secret|token|passwd|password|authorization:|BEGIN [A-Z ]*PRIVATE KEY'
+KW='api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|passwd|password|authorization:|BEGIN [A-Z ]*PRIVATE KEY'
 TOK='AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36,}|xox[bpars]-|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}'
 FN='\.env(\.|$)|\.pem$|\.pfx$|\.p12$|id_rsa|credential|secret'
 
