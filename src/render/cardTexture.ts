@@ -94,7 +94,7 @@ function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
   roundRect(ctx, 12, 12, W - 24, H - 24, 44);
   ctx.stroke();
 
-  // 角のランク+スート（上下2箇所）
+  // 角のランク+スート（上下2箇所）。卓上での視認性を優先し大きめに描く（項目2）。
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
   const corner = (x: number, y: number, flip: boolean): void => {
@@ -102,24 +102,24 @@ function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
     ctx.translate(x, y);
     if (flip) ctx.rotate(Math.PI);
     ctx.textBaseline = 'alphabetic';
-    ctx.font = 'bold 74px Georgia, "Times New Roman", serif';
+    ctx.font = 'bold 108px Georgia, "Times New Roman", serif';
     ctx.fillText(label, 0, 0);
-    ctx.font = 'bold 60px Georgia, serif';
-    ctx.fillText(glyph, 0, 62);
+    ctx.font = 'bold 88px Georgia, serif';
+    ctx.fillText(glyph, 0, 90);
     ctx.restore();
   };
-  corner(64, 96, false);
-  corner(W - 64, H - 42, true);
+  corner(78, 120, false);
+  corner(W - 78, H - 66, true);
 
-  // 中央: 絵札は大きな文字+スート、数札はピップ、7は強調
+  // 中央: 絵札は大きな文字+スート、数札はピップ、7は強調（いずれも拡大・項目2）。
   if (card.rank >= 11) {
-    ctx.font = 'bold 210px Georgia, serif';
+    ctx.font = 'bold 236px Georgia, serif';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, W / 2, H / 2 - 24);
-    ctx.font = 'bold 120px Georgia, serif';
-    ctx.fillText(glyph, W / 2, H / 2 + 150);
+    ctx.font = 'bold 138px Georgia, serif';
+    ctx.fillText(glyph, W / 2, H / 2 + 156);
   } else if (card.rank === 1) {
-    ctx.font = 'bold 300px Georgia, serif';
+    ctx.font = 'bold 336px Georgia, serif';
     ctx.textBaseline = 'middle';
     ctx.fillText(glyph, W / 2, H / 2);
   } else {
@@ -129,7 +129,7 @@ function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
       ctx.save();
       ctx.translate(px * W, py * H);
       if (flip) ctx.rotate(Math.PI);
-      ctx.font = 'bold 92px Georgia, serif';
+      ctx.font = 'bold 104px Georgia, serif';
       ctx.fillText(glyph, 0, 0);
       ctx.restore();
     }

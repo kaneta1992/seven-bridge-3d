@@ -8,7 +8,7 @@ import type { Action, PlayerView } from '../core';
 export const APP_ID = 'seven-bridge-3d-v1';
 
 /** 鳴き受付ウィンドウ長（ホスト権威のタイマー基準・要件 D6）。app.ts と一致させる。 */
-export const CLAIM_WINDOW_MS = 5000;
+export const CLAIM_WINDOW_MS = 10000;
 
 /** ゲスト参加時に「ホスト応答なし」と判断してリトライ案内を出すまでの猶予（E1/E5）。 */
 export const JOIN_TIMEOUT_MS = 15000;

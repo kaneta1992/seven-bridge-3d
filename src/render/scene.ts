@@ -8,6 +8,7 @@ import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
 import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
 import { disposeFelt, feltTexture } from './felt';
+import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
 import { createPostFX, type PostFX } from './postfx';
 import { detectQuality, type QualityTier } from './quality';
@@ -108,7 +109,13 @@ export class TableScene {
   // 席名ビルボードラベル（契約05項目2）: Canvas テクスチャの Sprite（常にカメラ正対）。
   private labels = new Map<
     number,
-    { sprite: THREE.Sprite; tex: THREE.CanvasTexture; mat: THREE.SpriteMaterial; key: string }
+    {
+      sprite: THREE.Sprite;
+      tex: THREE.CanvasTexture;
+      mat: THREE.SpriteMaterial;
+      key: string;
+      basePos: THREE.Vector3; // クランプ前の基準位置（縦画面の画面内収納に使う・項目4）
+    }
   >();
 
   constructor(container: HTMLElement) {
@@ -448,7 +455,8 @@ export class TableScene {
         let cursor = -total / 2; // 行左端の接線座標
         for (const meld of rowMelds) {
           const w = widthOf(meld);
-          meld.cards.forEach((card, k) => {
+          // 表示順に整列（連番はランク順・組はスート順）。core のメルドは不変に保つ（E8）。
+          orderedMeldCards(meld).forEach((card, k) => {
             const id = cardId(card);
             desired.add(id);
             const tan = cursor + (k + 0.5) * CARD_STEP;
@@ -730,6 +738,7 @@ export class TableScene {
 
   private updateLabels(view: PlayerView): void {
     const n = view.seats.length;
+    const portrait = this.aspect() < 1;
     for (const seat of view.seats) {
       const key = `${seat.name}|${seat.isCurrent ? 1 : 0}`;
       let L = this.labels.get(seat.index);
@@ -738,7 +747,7 @@ export class TableScene {
         const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
         const sprite = new THREE.Sprite(mat);
         this.scene.add(sprite);
-        L = { sprite, tex, mat, key };
+        L = { sprite, tex, mat, key, basePos: new THREE.Vector3() };
         this.labels.set(seat.index, L);
       } else if (L.key !== key) {
         L.tex.dispose();
@@ -747,15 +756,44 @@ export class TableScene {
         L.mat.needsUpdate = true;
         L.key = key;
       }
+      // 自席ラベルは非表示（項目5: 自分の席は画面下の扇形手札で自明）。
+      // ホットシートでは youIndex が手番ごとに変わるため、手番席のラベルが隠れる（意図どおり）。
+      if (seat.index === view.youIndex) {
+        L.sprite.visible = false;
+        continue;
+      }
       const dir = this.seatDir(seat.index);
-      L.sprite.position.copy(dir).multiplyScalar(SEAT_R * 1.12);
-      L.sprite.position.y = TABLE_TOP_Y + 0.72;
+      // 縦画面は視野が狭く上端で見切れやすいので、半径・高さを控えめにする（項目4）。
+      L.basePos.copy(dir).multiplyScalar(SEAT_R * (portrait ? 1.0 : 1.12));
+      L.basePos.y = TABLE_TOP_Y + (portrait ? 0.58 : 0.72);
+      L.sprite.position.copy(L.basePos);
       const s = seat.isCurrent ? 1.18 : 1.0;
       L.sprite.scale.set(1.3 * s, 0.46 * s, 1);
       L.sprite.visible = true;
     }
     // 席数が減った場合（次ゲームの人数変更等）は余ったラベルを隠す
     for (const [idx, L] of this.labels) if (idx >= n) L.sprite.visible = false;
+    this.clampLabels();
+  }
+
+  /**
+   * 席名ラベルを画面内に収める（項目4）。基準位置を投影し、上端を超える分だけ
+   * ワールド Y を下げてビューポート内へ引き戻す。カメラのイージング追従のため毎フレーム呼ぶ。
+   */
+  private clampLabels(): void {
+    const TOP = 0.9; // NDC 上端マージン（1.0=画面端）
+    this.camera.updateMatrixWorld();
+    this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
+    for (const L of this.labels.values()) {
+      if (!L.sprite.visible) continue;
+      L.sprite.position.copy(L.basePos);
+      const p = TMP_A.copy(L.basePos).project(this.camera);
+      if (p.y <= TOP) continue;
+      // 基準位置を 0.2 下げたときの NDC.y の低下量から、TOP へ収める下げ幅を線形に求める。
+      const p2 = TMP_B.copy(L.basePos).setY(L.basePos.y - 0.2).project(this.camera);
+      const slope = p.y - p2.y;
+      if (slope > 1e-3) L.sprite.position.y = L.basePos.y - ((p.y - TOP) / slope) * 0.2;
+    }
   }
 
   private makeLabelTexture(name: string, current: boolean): THREE.CanvasTexture {
@@ -951,6 +989,9 @@ export class TableScene {
     this.spot.target.position.copy(this.spotTarget);
     this.spot.target.updateMatrixWorld?.();
 
+    // 席名ラベルの画面内クランプ（カメラのイージングに追従・項目4）
+    this.clampLabels();
+
     // 既知カード補間 + 出現ポップ + 退場処理
     for (const [id, obj] of this.known) {
       if (now - obj.born >= obj.delay) {
@@ -1118,6 +1159,7 @@ export class TableScene {
 }
 
 const TMP_A = new THREE.Vector3(); // ループ内の一時ベクトル（毎フレームの new を避ける）
+const TMP_B = new THREE.Vector3(); // clampLabels の投影勾配推定用
 const TMP_HIT = new THREE.Vector3(); // dropTargetAt の交点用（ポインタ処理とループは同時実行されない）
 
 function hashId(id: string): number {

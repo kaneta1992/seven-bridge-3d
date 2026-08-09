@@ -14,6 +14,7 @@ import {
 } from '../net/protocol';
 import { NetSession } from '../net/session';
 import { createTrysteroTransport } from '../net/trysteroTransport';
+import { orderedMeldCards } from '../render/meldSort';
 import { TableScene } from '../render/scene';
 import { AudioKit } from './audio';
 import { Callouts, countUp } from './callout';
@@ -28,7 +29,7 @@ const RANK_LABEL: Record<number, string> = {
 };
 const isRed = (c: Card): boolean => c.suit === 'D' || c.suit === 'H';
 const rankText = (c: Card): string => RANK_LABEL[c.rank] ?? String(c.rank);
-const CLAIM_WINDOW_MS = 5000;
+const CLAIM_WINDOW_MS = 10000;
 
 interface WaitInfo {
   code: string;
@@ -70,6 +71,7 @@ export class GameUI {
   private drawnId: string | null = null;
   private drawnBig = false;
   private drawTimers: number[] = [];
+  private autoDrawKey = ''; // 自動ツモの発火済み手番キー
   private prevDeckCount = -1;
   private prevTurnKey = '';
   private prevHandIds: string[] = [];
@@ -168,6 +170,7 @@ export class GameUI {
     this.drag = null;
     this.drawnId = null;
     this.drawnBig = false;
+    this.autoDrawKey = '';
     this.lastView = null;
     this.prevDeckCount = -1;
     this.prevTurnKey = '';
@@ -296,6 +299,13 @@ export class GameUI {
 
   private isMyTurn(view: PlayerView): boolean {
     return view.seats[view.youIndex]?.isCurrent ?? false;
+  }
+
+  // 鳴きウィンドウ中、この端末に鳴ける席があるか（項目3: 鳴き選択UI・カウントダウンの秘匿判定）。
+  // ネット実装の claimants() は視界フィルタで自席分のみを返すため、非対象者では空になる。
+  // ホットシートは全席を1台で操作するため常に非空＝現行どおり表示される（秘匿対象外）。
+  private amClaimant(view: PlayerView): boolean {
+    return view.phase === 'meldWindow' && this.driver!.claimants().length > 0;
   }
 
   // 手札をローカル表示順（handOrder）に並べ替えて返す。同時に handOrder を現在の手札集合へ
@@ -456,7 +466,10 @@ export class GameUI {
     }
     this.overlay.append(this.buildTopbar(view));
     this.overlay.append(this.buildMelds(view));
-    if (view.phase === 'meldWindow') {
+    // 鳴き選択UI・カウントダウンは鳴ける本人にのみ表示（項目3・秘匿）。非対象者にはパネルを出さない。
+    // 満了確定（closeWindow）はパネルとは独立に syncClaimTimer/tickClaim が権威側で駆動する（E2）。
+    this.timerBar = null; // 前 render のバー参照を破棄（非対象者はバーを持たない）
+    if (view.phase === 'meldWindow' && this.amClaimant(view)) {
       this.overlay.append(this.buildClaimPanel(view));
     }
     if (view.phase === 'roundOver') {
@@ -466,8 +479,9 @@ export class GameUI {
 
   private buildTopbar(view: PlayerView): HTMLElement {
     const current = view.seats.find((s) => s.isCurrent);
+    // 鳴き受付中の表示は「鳴ける本人」にのみ出す。非対象者は通常の手番待ち表示のまま（項目3・秘匿）。
     const turnText =
-      view.phase === 'meldWindow'
+      view.phase === 'meldWindow' && this.amClaimant(view)
         ? '鳴き受付中…'
         : view.phase === 'awaitingStart'
           ? '配札待ち…'
@@ -512,7 +526,8 @@ export class GameUI {
         el('span', { class: 'owner', text: `${nameOf(meld.owner)}·${kindLabel}` }),
       ]);
       node.dataset.meldId = String(meld.id);
-      for (const c of meld.cards) node.append(this.chip(c));
+      // 表示順に整列（連番はランク順・組はスート順）。core のメルドは不変に保つ（E8）。
+      for (const c of orderedMeldCards(meld)) node.append(this.chip(c));
       if (attachable) {
         node.onclick = () =>
           void this.dispatch({ type: 'attach', player: meId, meldId: meld.id, card: attachCard! }, () =>
@@ -638,10 +653,24 @@ export class GameUI {
       const current = view.seats.find((s) => s.isCurrent);
       hint.textContent = `${current?.name ?? '他のプレイヤー'} さんの手番です…`;
     } else if (myTurn && view.phase === 'awaitingDraw') {
-      hint.textContent = '山札から1枚ツモってください。';
-      const draw = el('button', { class: 'primary', text: '山札からツモる' });
-      draw.onclick = () => void this.dispatch({ type: 'draw', player: me });
-      actions.append(draw);
+      // ターン開始時の自動ツモ（2026-08-10 ユーザー要望）。手番キーごとに1回だけ発火し、
+      // 失敗時はキーを戻して次renderで再試行する。少し間を置き手番バナーと演出順を整える。
+      hint.textContent = '山札からツモっています…';
+      const key = `${view.round}:${view.youIndex}:${view.deckCount}:${view.hand.length}`;
+      if (this.autoDrawKey !== key) {
+        this.autoDrawKey = key;
+        this.fxTimers.push(
+          window.setTimeout(() => {
+            const v = this.lastView;
+            if (!this.driver || !v || !this.isMyTurn(v) || v.phase !== 'awaitingDraw') return;
+            const player = this.driver.currentPlayerId();
+            void (async () => {
+              const r = await this.driver!.dispatch({ type: 'draw', player });
+              if (!r.ok) this.autoDrawKey = '';
+            })();
+          }, 450),
+        );
+      }
     } else if (myTurn && view.phase === 'awaitingDiscard') {
       hint.textContent =
         sel.length === 0
@@ -840,23 +869,39 @@ export class GameUI {
     this.overlay.querySelectorAll('.meld.drop-over').forEach((n) => n.classList.remove('drop-over'));
   }
 
-  // 2D メルドチップ（右上パネル展開時のみ DOM 存在）への付け札当たり判定。折畳み時は 0 矩形で不成立→3Dへ委譲（E9）。
+  // 2D メルドチップ（右上パネル展開時のみ DOM 存在）への付け札当たり判定。
+  // 項目8修正: 以前は個々のチップ矩形（30×42px と小さい）への厳密な内包判定だったため、
+  // 大きなドラッグゴーストで狙ってもポインタ実座標が小チップを外れて不発になっていた
+  // （ヒットテスト過敏／ドラッグ札の z が上に被る）。展開中パネル領域（+マージン）内への
+  // ドロップを付け札とみなし、その中で「付け札できるメルドのうちポインタに最も近いもの」へ
+  // 寄せることで、小さなチップを精密に狙わなくても確実に成立させる。折畳み時は 3D へ委譲（E9）。
   private domMeldAt(card: Card, x: number, y: number): Meld | null {
     const v = this.lastView;
     if (!v || !this.canPlayNow()) return null;
     const me = this.driver!.currentPlayerId();
     if (!v.melds.some((m) => m.owner === me)) return null;
+    const panel = this.overlay.querySelector('.meldpanel.open') as HTMLElement | null;
+    if (!panel) return null; // 折り畳み中は 2D 経路なし → 3D 卓へ委譲
+    const pr = panel.getBoundingClientRect();
+    if (pr.width === 0) return null;
+    const M = 14; // 取りこぼし対策の許容マージン
+    if (x < pr.left - M || x > pr.right + M || y < pr.top - M || y > pr.bottom + M) return null;
+    let best: Meld | null = null;
+    let bestD = Infinity;
     for (const node of Array.from(this.overlay.querySelectorAll('.meld'))) {
       const mid = (node as HTMLElement).dataset.meldId;
       if (!mid) continue;
       const r = (node as HTMLElement).getBoundingClientRect();
       if (r.width === 0) continue;
-      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-        const meld = v.melds.find((m) => String(m.id) === mid);
-        if (meld && canAttach(meld, card)) return meld;
+      const meld = v.melds.find((m) => String(m.id) === mid);
+      if (!meld || !canAttach(meld, card)) continue; // 付けられないメルドは対象外
+      const d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
+      if (d < bestD) {
+        bestD = d;
+        best = meld;
       }
     }
-    return null;
+    return best;
   }
 
   // ドロップ確定: 2Dメルドチップ > 3D標的（メルド > 捨て札 > 場）。卓外/手札帯は false（並び替え扱い・E6）。
