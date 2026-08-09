@@ -1,14 +1,9 @@
-// UI エントリの最小プレースホルダ（後続フェーズで 3D / 通信を実装）。
-import { createGame } from './core';
-
-const game = createGame({
-  players: [
-    { id: 'p1', name: 'プレイヤー1' },
-    { id: 'p2', name: 'プレイヤー2' },
-  ],
-});
+// エントリ: HUD + 3D シーンのオーケストレータを起動する。
+// ゲームロジックには触れず、ドライバ境界（GameDriver）越しに動作する（契約03 でネットワーク実装に差し替え可能）。
+import './ui/styles.css';
+import { GameUI } from './ui/app';
 
 const app = document.getElementById('app');
 if (app) {
-  app.textContent = `セブンブリッジ 3D — コア構築済み（phase: ${game.phase}）`;
+  new GameUI(app);
 }

@@ -1,0 +1,504 @@
+// Three.js 3D 卓シーン。すべてプロシージャル（外部アセットなし・要件 D7 / §3.2）。
+// アニメーションは「各カードを目標トランスフォームへ毎フレーム補間」する統一モデル。
+// これにより 配札/ツモ/捨て札/メルド公開/付け札/ポン・チー が同一機構で滑らかに表現され、
+// 即時テレポートを避ける（要件§3.2）。ジオメトリ/マテリアルは共有し draw call を抑制（E5）。
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import type { Card, PlayerView } from '../core';
+import { cardId } from '../core';
+import { backTexture, faceTexture, setMaxAnisotropy } from './cardTexture';
+import { feltTexture } from './felt';
+
+const CARD_W = 0.72;
+const CARD_H = 1.0;
+const CARD_D = 0.02;
+const TABLE_TOP_Y = 0;
+const SEAT_R = 2.55; // 席の半径
+const HAND_SPACING = 0.52;
+const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
+
+interface CardObj {
+  id: string;
+  group: THREE.Group;
+  born: number;
+  delay: number;
+  targetPos: THREE.Vector3;
+  targetQuat: THREE.Quaternion;
+  removing: boolean;
+  removeAt: number;
+  spawned: boolean;
+}
+
+interface UpdateOpts {
+  selectedIds?: Set<string>;
+  attachTargets?: boolean;
+}
+
+export class TableScene {
+  private renderer: THREE.WebGLRenderer;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  private clock = new THREE.Clock();
+
+  // 共有リソース
+  private bodyGeo: RoundedBoxGeometry;
+  private planeGeo: THREE.PlaneGeometry;
+  private bodyMat: THREE.MeshStandardMaterial;
+  private backMat: THREE.MeshStandardMaterial;
+  private frontMatCache = new Map<string, THREE.MeshStandardMaterial>();
+
+  // 既知カード（面が判明: 自手札/捨て札/メルド）を cardId で管理
+  private known = new Map<string, CardObj>();
+  // 匿名の裏カード（他家手札・山札）のプール
+  private backPool: CardObj[] = [];
+
+  // カメラ演出
+  private camPos = new THREE.Vector3(0, 4, 6);
+  private camTarget = new THREE.Vector3(0, 0, 0);
+  private camPosGoal = new THREE.Vector3(0, 4, 6);
+  private camTargetGoal = new THREE.Vector3(0, 0, 0);
+
+  private seatCount = 4;
+  private raf = 0;
+  private running = false;
+  private idle = 0;
+  private container: HTMLElement;
+
+  constructor(container: HTMLElement) {
+    this.container = container;
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setSize(container.clientWidth, container.clientHeight);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    container.appendChild(this.renderer.domElement);
+    this.renderer.domElement.style.display = 'block';
+    setMaxAnisotropy(this.renderer.capabilities.getMaxAnisotropy());
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color('#0a1018');
+    this.scene.fog = new THREE.Fog('#0a1018', 9, 20);
+
+    this.camera = new THREE.PerspectiveCamera(45, this.aspect(), 0.1, 100);
+    this.camera.position.copy(this.camPos);
+
+    this.bodyGeo = new RoundedBoxGeometry(CARD_W, CARD_H, CARD_D, 4, 0.06);
+    this.planeGeo = new THREE.PlaneGeometry(CARD_W * 0.98, CARD_H * 0.98);
+    this.bodyMat = new THREE.MeshStandardMaterial({ color: '#f2efe6', roughness: 0.55, metalness: 0.0 });
+    this.backMat = new THREE.MeshStandardMaterial({ map: backTexture(), roughness: 0.5, metalness: 0.05 });
+
+    this.buildEnvironment();
+    this.wake();
+  }
+
+  /** 補間ループを起動（settle 後は自動停止するため、状態変化のたびに呼ぶ）。 */
+  private wake(): void {
+    this.idle = 0;
+    if (!this.running) {
+      this.running = true;
+      this.clock.getDelta(); // 蓄積した dt を捨てる
+      this.raf = requestAnimationFrame(this.loop);
+    }
+  }
+
+  private aspect(): number {
+    const w = Math.max(1, this.container.clientWidth);
+    const h = Math.max(1, this.container.clientHeight);
+    return w / h;
+  }
+
+  private buildEnvironment(): void {
+    // 環境光・半球光・キーライト（影）・スポット（ドラマ）
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x24301f, 0.5));
+
+    const key = new THREE.DirectionalLight(0xfff4e0, 1.3);
+    key.position.set(3.5, 8, 4);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.near = 1;
+    key.shadow.camera.far = 25;
+    const d = 7;
+    key.shadow.camera.left = -d;
+    key.shadow.camera.right = d;
+    key.shadow.camera.top = d;
+    key.shadow.camera.bottom = -d;
+    key.shadow.bias = -0.0004;
+    this.scene.add(key);
+
+    const spot = new THREE.SpotLight(0xffffff, 40, 20, Math.PI / 5, 0.6, 1.4);
+    spot.position.set(0, 9, 0.5);
+    spot.target.position.set(0, 0, 0);
+    this.scene.add(spot);
+    this.scene.add(spot.target);
+
+    // 卓（フェルト天板 + 木縁）
+    const feltMat = new THREE.MeshStandardMaterial({ map: feltTexture(), roughness: 0.9, metalness: 0.0 });
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 3.5, 0.3, 72), feltMat);
+    top.position.y = TABLE_TOP_Y - 0.15;
+    top.receiveShadow = true;
+    this.scene.add(top);
+
+    const rimMat = new THREE.MeshStandardMaterial({ color: '#5a3a21', roughness: 0.6, metalness: 0.15 });
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(3.5, 0.16, 24, 80), rimMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = TABLE_TOP_Y;
+    rim.castShadow = true;
+    rim.receiveShadow = true;
+    this.scene.add(rim);
+
+    // 床（影の受け皿）
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(14, 48),
+      new THREE.MeshStandardMaterial({ color: '#0c141d', roughness: 1 }),
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.45;
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+  }
+
+  // ---- カードメッシュ生成（共有ジオメトリ/マテリアル） --------------------
+
+  private frontMat(card: Card): THREE.MeshStandardMaterial {
+    const key = cardId(card);
+    let m = this.frontMatCache.get(key);
+    if (!m) {
+      m = new THREE.MeshStandardMaterial({ map: faceTexture(card), roughness: 0.5, metalness: 0.02 });
+      this.frontMatCache.set(key, m);
+    }
+    return m;
+  }
+
+  private buildCard(card: Card | null): THREE.Group {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(this.bodyGeo, this.bodyMat);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+
+    const back = new THREE.Mesh(this.planeGeo, this.backMat);
+    back.rotation.y = Math.PI;
+    back.position.z = -(CARD_D / 2 + 0.002);
+    g.add(back);
+
+    if (card) {
+      const front = new THREE.Mesh(this.planeGeo, this.frontMat(card));
+      front.position.z = CARD_D / 2 + 0.002;
+      g.add(front);
+    }
+    return g;
+  }
+
+  // ---- レイアウト計算 -----------------------------------------------------
+
+  private seatAngle(i: number): number {
+    return Math.PI / 2 + (i * 2 * Math.PI) / this.seatCount;
+  }
+
+  private seatDir(i: number): THREE.Vector3 {
+    const a = this.seatAngle(i);
+    return new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
+  }
+
+  /** 卓に平置きし、top 辺を center 方向（=そのカメラから見て上）へ向けるクォータニオン。 */
+  private flatQuat(seatIndex: number, extraYaw = 0, faceUp = true): THREE.Quaternion {
+    const a = this.seatAngle(seatIndex);
+    const e = new THREE.Euler(faceUp ? -Math.PI / 2 : Math.PI / 2, -a + Math.PI / 2 + extraYaw, 0, 'YXZ');
+    return new THREE.Quaternion().setFromEuler(e);
+  }
+
+  private handPositions(seatIndex: number, count: number): THREE.Vector3[] {
+    const dir = this.seatDir(seatIndex);
+    const tangent = new THREE.Vector3(-dir.z, 0, dir.x);
+    const anchor = dir.clone().multiplyScalar(SEAT_R - 0.15);
+    const out: THREE.Vector3[] = [];
+    for (let k = 0; k < count; k++) {
+      const t = k - (count - 1) / 2;
+      const p = anchor
+        .clone()
+        .addScaledVector(tangent, t * HAND_SPACING)
+        .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.03 + k * 0.001, 0))
+        // 手前ほど中心から少し離す（扇の膨らみ）
+        .addScaledVector(dir, -Math.abs(t) * 0.03);
+      out.push(p);
+    }
+    return out;
+  }
+
+  // ---- 状態反映 -----------------------------------------------------------
+
+  update(view: PlayerView, opts: UpdateOpts = {}): void {
+    this.seatCount = view.seats.length;
+    const now = performance.now();
+    const selected = opts.selectedIds ?? new Set<string>();
+    const seatIndexById = new Map<string, number>();
+    view.seats.forEach((s) => seatIndexById.set(s.id, s.index));
+
+    const desired = new Set<string>();
+    const deckPos = new THREE.Vector3(0.95, TABLE_TOP_Y + 0.05, 0);
+
+    // 1) 自手札（面表示・youIndex 席）
+    const handPos = this.handPositions(view.youIndex, view.hand.length);
+    view.hand.forEach((card, k) => {
+      const id = cardId(card);
+      desired.add(id);
+      const fan = (k - (view.hand.length - 1) / 2) * 0.05;
+      const q = this.flatQuat(view.youIndex, fan, true);
+      const p = handPos[k]!.clone();
+      if (selected.has(id)) {
+        // 選択カードは持ち上げ、カメラ側へ少し引く
+        p.y += 0.35;
+        p.addScaledVector(this.seatDir(view.youIndex), 0.12);
+      }
+      this.place(id, card, p, q, now, k * 45, deckPos);
+    });
+
+    // 2) メルド（面表示・所有者席寄り）
+    const meldsByOwner = new Map<number, number>();
+    for (const meld of view.melds) {
+      const seat = seatIndexById.get(meld.owner) ?? view.youIndex;
+      const dir = this.seatDir(seat);
+      const tangent = new THREE.Vector3(-dir.z, 0, dir.x);
+      const slot = meldsByOwner.get(seat) ?? 0;
+      meldsByOwner.set(seat, slot + 1);
+      const rowAnchor = dir
+        .clone()
+        .multiplyScalar(SEAT_R * 0.52)
+        .addScaledVector(tangent, (slot - 1) * 0.95);
+      meld.cards.forEach((card, k) => {
+        const id = cardId(card);
+        desired.add(id);
+        const t = k - (meld.cards.length - 1) / 2;
+        const p = rowAnchor
+          .clone()
+          .addScaledVector(tangent, t * 0.28)
+          .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.03, 0));
+        this.place(id, card, p, this.flatQuat(seat, 0, true), now, 0, deckPos);
+      });
+    }
+
+    // 3) 捨て札（面表示・中央散らし、決定的ジッタ）
+    const discardStart = new THREE.Vector3(-0.95, TABLE_TOP_Y, 0);
+    view.discardPile.forEach((card, k) => {
+      const id = cardId(card);
+      desired.add(id);
+      const jx = (hashId(id) % 100) / 100 - 0.5;
+      const jz = (((hashId(id) / 7) | 0) % 100) / 100 - 0.5;
+      const p = discardStart
+        .clone()
+        .add(new THREE.Vector3(jx * 0.35, TABLE_TOP_Y + 0.03 + k * 0.008, jz * 0.35));
+      const q = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(-Math.PI / 2, jx * 0.6, 0, 'YXZ'),
+      );
+      this.place(id, card, p, q, now, 0, deckPos);
+    });
+
+    // 既知カードのうち今回不要になったものを退場アニメ
+    for (const [id, obj] of this.known) {
+      if (!desired.has(id) && !obj.removing) {
+        obj.removing = true;
+        obj.removeAt = now;
+      }
+    }
+
+    // 4) 他家手札（匿名裏カード）+ 5) 山札（裏カードのスタック）
+    const backTargets: { pos: THREE.Vector3; quat: THREE.Quaternion }[] = [];
+    view.seats.forEach((seat) => {
+      if (seat.index === view.youIndex) return;
+      const pos = this.handPositions(seat.index, seat.handCount);
+      pos.forEach((p, k) => {
+        const fan = (k - (seat.handCount - 1) / 2) * 0.05;
+        backTargets.push({ pos: p, quat: this.flatQuat(seat.index, fan, false) });
+      });
+    });
+    const deckShown = Math.min(view.deckCount, 14);
+    for (let i = 0; i < deckShown; i++) {
+      backTargets.push({
+        pos: new THREE.Vector3(0.95, TABLE_TOP_Y + 0.03 + i * 0.02, 0),
+        quat: new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0)),
+      });
+    }
+    this.syncBackPool(backTargets, now);
+
+    // カメラを現手番（=youIndex）席の背後へ演出移動
+    this.aimCameraAt(view.youIndex);
+    this.wake();
+  }
+
+  private place(
+    id: string,
+    card: Card,
+    pos: THREE.Vector3,
+    quat: THREE.Quaternion,
+    now: number,
+    delay: number,
+    spawnPos: THREE.Vector3,
+  ): void {
+    let obj = this.known.get(id);
+    if (!obj) {
+      const group = this.buildCard(card);
+      group.position.copy(spawnPos);
+      group.quaternion.copy(quat);
+      this.scene.add(group);
+      obj = {
+        id,
+        group,
+        born: now,
+        delay,
+        targetPos: pos.clone(),
+        targetQuat: quat.clone(),
+        removing: false,
+        removeAt: 0,
+        spawned: false,
+      };
+      this.known.set(id, obj);
+    } else {
+      obj.targetPos.copy(pos);
+      obj.targetQuat.copy(quat);
+      obj.removing = false;
+      obj.group.scale.setScalar(1);
+    }
+  }
+
+  private syncBackPool(
+    targets: { pos: THREE.Vector3; quat: THREE.Quaternion }[],
+    now: number,
+  ): void {
+    // 必要数までプール拡張
+    while (this.backPool.length < targets.length) {
+      const group = this.buildCard(null);
+      group.visible = false;
+      this.scene.add(group);
+      this.backPool.push({
+        id: `back${this.backPool.length}`,
+        group,
+        born: now,
+        delay: 0,
+        targetPos: new THREE.Vector3(),
+        targetQuat: new THREE.Quaternion(),
+        removing: false,
+        removeAt: 0,
+        spawned: true,
+      });
+    }
+    this.backPool.forEach((obj, i) => {
+      if (i < targets.length) {
+        if (!obj.group.visible) {
+          obj.group.visible = true;
+          obj.group.position.copy(targets[i]!.pos);
+          obj.group.quaternion.copy(targets[i]!.quat);
+        }
+        obj.targetPos.copy(targets[i]!.pos);
+        obj.targetQuat.copy(targets[i]!.quat);
+      } else {
+        obj.group.visible = false;
+      }
+    });
+  }
+
+  private aimCameraAt(seatIndex: number): void {
+    const dir = this.seatDir(seatIndex);
+    const portrait = this.aspect() < 1;
+    const back = portrait ? 3.4 : 2.7;
+    const height = portrait ? 4.6 : 3.6;
+    const fwd = portrait ? 0.1 : 0.35;
+    this.camPosGoal.copy(dir).multiplyScalar(SEAT_R + back);
+    this.camPosGoal.y = height;
+    this.camTargetGoal.copy(dir).multiplyScalar(fwd);
+    this.camTargetGoal.y = 0;
+    this.camera.fov = portrait ? 58 : 46;
+    this.camera.updateProjectionMatrix();
+  }
+
+  // ---- 描画ループ ---------------------------------------------------------
+
+  private loop = (): void => {
+    const dt = Math.min(this.clock.getDelta(), 0.05);
+    const k = 1 - Math.exp(-EASE_SPEED * dt);
+    const now = performance.now();
+    let motion = 0; // 残り移動量の指標（settle 判定用）
+    let busy = false; // 退場アニメ等で継続が必要か
+
+    // カメラ補間
+    motion += this.camPos.distanceTo(this.camPosGoal) + this.camTarget.distanceTo(this.camTargetGoal);
+    this.camPos.lerp(this.camPosGoal, k * 0.6);
+    this.camTarget.lerp(this.camTargetGoal, k * 0.6);
+    this.camera.position.copy(this.camPos);
+    this.camera.lookAt(this.camTarget);
+
+    // 既知カード補間 + 退場処理
+    for (const [id, obj] of this.known) {
+      if (now - obj.born >= obj.delay) {
+        obj.spawned = true;
+        motion += obj.group.position.distanceTo(obj.targetPos);
+        obj.group.position.lerp(obj.targetPos, k);
+        obj.group.quaternion.slerp(obj.targetQuat, k);
+      } else {
+        busy = true; // 配札ディレイ待ち
+      }
+      if (obj.removing) {
+        busy = true;
+        const s = Math.max(0, 1 - (now - obj.removeAt) / 260);
+        obj.group.scale.setScalar(s);
+        if (s <= 0.001) {
+          this.scene.remove(obj.group);
+          this.known.delete(id);
+        }
+      }
+    }
+    // 裏カード補間
+    for (const obj of this.backPool) {
+      if (!obj.group.visible) continue;
+      motion += obj.group.position.distanceTo(obj.targetPos);
+      obj.group.position.lerp(obj.targetPos, k);
+      obj.group.quaternion.slerp(obj.targetQuat, k);
+    }
+
+    this.renderer.render(this.scene, this.camera);
+
+    // settle したら次ラウンド/操作まで RAF を停止（省電力・E5 / スクショ可能化）
+    if (motion < 0.004 && !busy) this.idle++;
+    else this.idle = 0;
+    if (this.idle > 4) {
+      this.running = false;
+    } else {
+      this.raf = requestAnimationFrame(this.loop);
+    }
+  };
+
+  resize(): void {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setSize(w, h);
+    this.camera.aspect = this.aspect();
+    this.camera.updateProjectionMatrix();
+    this.wake();
+  }
+
+  /** ラウンド切り替え等でカードを全消去（次の update で再構築）。 */
+  clearCards(): void {
+    for (const [, obj] of this.known) this.scene.remove(obj.group);
+    this.known.clear();
+    for (const obj of this.backPool) obj.group.visible = false;
+    this.wake();
+  }
+
+  dispose(): void {
+    cancelAnimationFrame(this.raf);
+    this.renderer.dispose();
+    if (this.renderer.domElement.parentElement === this.container) {
+      this.container.removeChild(this.renderer.domElement);
+    }
+  }
+}
+
+function hashId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) & 0xffff;
+  return h;
+}
