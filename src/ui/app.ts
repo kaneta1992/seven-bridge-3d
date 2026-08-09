@@ -497,11 +497,23 @@ export class GameUI {
       const m = this.audio?.toggleMute();
       muteBtn.textContent = m ? '🔇' : '🔊';
     };
+    // 視点リセット（契約07項目1）: ピンチ/スワイプで動かしたカメラを自席の既定視点へ戻す。
+    // 回転して自分の向きを見失っても一押しで復帰できる（E5: 自席方向の手掛かり）。
+    const resetBtn = el('button', {
+      class: 'icon',
+      text: '🎯',
+      title: '視点を自席へ戻す',
+    });
+    resetBtn.onclick = () => {
+      this.scene?.resetView();
+      this.audio?.click();
+    };
     return el('div', { class: 'topbar' }, [
       el('span', { class: 'turn', text: turnText }),
       el('span', { class: 'spacer' }),
       el('span', { class: 'pill', text: `ラウンド ${view.round}/${view.totalRounds}` }),
       el('span', { class: 'pill', text: `山札 ${view.deckCount}` }),
+      resetBtn,
       muteBtn,
       scoreBtn,
     ]);

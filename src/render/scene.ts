@@ -26,6 +26,14 @@ const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の
 const DISCARD_R = 0.62; // 捨て札ドロップ判定の半径（山札 +0.5 と干渉しない大きさ）
 const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓外＝取り消し）
 
+// ユーザーカメラ操作（契約07項目1）: 卓中心まわりのオービット。ズーム=半径、スワイプ=方位/仰角。
+const MIN_ORBIT_R = 3.4; // ズーム最接近（卓面へ寄れる下限・クリッピング回避）
+const MAX_ORBIT_R = 13.0; // ズーム最遠（全卓俯瞰の上限・fog 手前に収める）
+const MIN_ORBIT_PITCH = 0.14; // 仰角下限（卓すれすれ・約8°。遠い席名を見に行ける）
+const MAX_ORBIT_PITCH = 1.45; // 仰角上限（ほぼ真上・約83°。卓が裏返らない）
+const ORBIT_YAW_SENS = 0.006; // 方位感度（rad/px）
+const ORBIT_PITCH_SENS = 0.006; // 仰角感度（rad/px）
+
 // 3D 卓上のドロップ標的（契約05項目1）。手札カードのドラッグ先を screen→3D で判定する。
 export type DropTarget =
   | { kind: 'discard' }
@@ -69,6 +77,20 @@ export class TableScene {
   private camTarget = new THREE.Vector3(0, 0, 0);
   private camPosGoal = new THREE.Vector3(0, 4, 6);
   private camTargetGoal = new THREE.Vector3(0, 0, 0);
+
+  // ユーザーカメラ操作の状態（契約07項目1）。userControlled 中は自動フレーミング（aimCameraAt）を
+  // 抑止し、ユーザーが選んだ視点を保持する。リセットボタン / ラウンド切替（clearCards）で解除。
+  private userControlled = false;
+  private orbitYaw = 0;
+  private orbitPitch = 0.6;
+  private orbitRadius = 7.4;
+  private orbitTarget = new THREE.Vector3();
+  private pointers = new Map<number, { x: number; y: number }>();
+  private pinchDist = 0;
+  private onCamPointerDown!: (e: PointerEvent) => void;
+  private onCamPointerMove!: (e: PointerEvent) => void;
+  private onCamPointerUp!: (e: PointerEvent) => void;
+  private onCamWheel!: (e: WheelEvent) => void;
 
   private seatCount = 4;
   private raf = 0;
@@ -131,6 +153,7 @@ export class TableScene {
     container.appendChild(this.renderer.domElement);
     this.renderer.domElement.style.display = 'block';
     setMaxAnisotropy(this.renderer.capabilities.getMaxAnisotropy());
+    this.attachCameraControls();
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0a1018');
@@ -519,8 +542,9 @@ export class TableScene {
     this.freshDeal = false;
     this.syncBackPool(backTargets, now, dealing, deckPos);
 
-    // カメラを現手番（=youIndex）席の背後へ演出移動
-    this.aimCameraAt(view.youIndex);
+    // カメラを現手番（=youIndex）席の背後へ演出移動。ただしユーザーが視点を操作中は勝手に戻さない
+    // （契約07項目1: リセットはユーザー操作で。ラウンド切替=clearCards で自動的に既定へ復帰する）。
+    if (!this.userControlled) this.aimCameraAt(view.youIndex);
     // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る）
     const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
     this.setActiveSeat(curSeat);
@@ -777,22 +801,44 @@ export class TableScene {
   }
 
   /**
-   * 席名ラベルを画面内に収める（項目4）。基準位置を投影し、上端を超える分だけ
-   * ワールド Y を下げてビューポート内へ引き戻す。カメラのイージング追従のため毎フレーム呼ぶ。
+   * 席名ラベルを画面内に収める（項目2・4）。基準位置を投影し、上下端を超える分は
+   * ワールド Y を上下させ、左右端（|NDC.x|>SIDE）を超える分はカメラ右方向（水平面）へ
+   * 押し戻す。縦画面で左右席のラベルがはみ出す問題（R7 の上端クランプだけでは不足）を解消する。
+   * 端に寄せることで席の左右方向は保たれるため、どの席のラベルかは判別できる。
+   * カメラのイージング追従（およびユーザーのオービット）に合わせて毎フレーム呼ぶ。
    */
   private clampLabels(): void {
     const TOP = 0.9; // NDC 上端マージン（1.0=画面端）
+    const BOT = -0.92; // NDC 下端マージン
+    const SIDE = 0.94; // NDC 左右端マージン（|x|>SIDE で内側へ引き戻す）
+    const STEP = 0.25; // 投影勾配を推定するプローブ量（ワールド単位）
     this.camera.updateMatrixWorld();
-    this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
+    // カメラ右ベクトル（水平面成分）。ラベルを画面水平方向へ押し戻すための移動軸。
+    const right = TMP_R.setFromMatrixColumn(this.camera.matrixWorld, 0);
+    right.y = 0;
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+    right.normalize();
     for (const L of this.labels.values()) {
       if (!L.sprite.visible) continue;
       L.sprite.position.copy(L.basePos);
-      const p = TMP_A.copy(L.basePos).project(this.camera);
-      if (p.y <= TOP) continue;
-      // 基準位置を 0.2 下げたときの NDC.y の低下量から、TOP へ収める下げ幅を線形に求める。
-      const p2 = TMP_B.copy(L.basePos).setY(L.basePos.y - 0.2).project(this.camera);
-      const slope = p.y - p2.y;
-      if (slope > 1e-3) L.sprite.position.y = L.basePos.y - ((p.y - TOP) / slope) * 0.2;
+      // 縦方向: 上端超過は下げ、下端超過は上げる（プローブで勾配を線形推定）。
+      let p = TMP_A.copy(L.sprite.position).project(this.camera);
+      if (p.y > TOP || p.y < BOT) {
+        const target = p.y > TOP ? TOP : BOT;
+        const p2 = TMP_B.copy(L.sprite.position).setY(L.sprite.position.y - STEP).project(this.camera);
+        const slope = (p.y - p2.y) / STEP; // dNDC.y / dWorldY
+        if (Math.abs(slope) > 1e-3) L.sprite.position.y += (target - p.y) / slope;
+      }
+      // 横方向: 左右端超過はカメラ右方向へ押し戻す（縦補正後の位置で再投影）。
+      p = TMP_A.copy(L.sprite.position).project(this.camera);
+      if (Math.abs(p.x) > SIDE) {
+        const p3 = TMP_B.copy(L.sprite.position).addScaledVector(right, STEP).project(this.camera);
+        const slope = (p3.x - p.x) / STEP; // dNDC.x / d(along right)
+        if (Math.abs(slope) > 1e-4) {
+          const targetX = Math.sign(p.x) * SIDE;
+          L.sprite.position.addScaledVector(right, (targetX - p.x) / slope);
+        }
+      }
     }
   }
 
@@ -950,6 +996,143 @@ export class TableScene {
     this.camera.updateProjectionMatrix();
   }
 
+  // ---- ユーザーカメラ操作（契約07項目1: ピンチズーム / スワイプ軌道回転） --------
+  // 3D キャンバス上のポインタのみを扱う。手札 D&D は handEl がポインタキャプチャするため
+  // ここには届かず、住み分けは自動的に成立する（手札を卓へドラッグ中はカメラを動かさない）。
+  private attachCameraControls(): void {
+    const el = this.renderer.domElement as HTMLElement;
+    el.style.touchAction = 'none'; // ピンチでページ全体がズームしないように（E5）
+
+    const orbitFromDelta = (dx: number, dy: number): void => {
+      this.ensureUserControl();
+      this.orbitYaw -= dx * ORBIT_YAW_SENS;
+      this.orbitPitch = clamp(this.orbitPitch - dy * ORBIT_PITCH_SENS, MIN_ORBIT_PITCH, MAX_ORBIT_PITCH);
+      this.applyOrbit();
+    };
+    const zoomBy = (factor: number): void => {
+      this.ensureUserControl();
+      this.orbitRadius = clamp(this.orbitRadius * factor, MIN_ORBIT_R, MAX_ORBIT_R);
+      this.applyOrbit();
+    };
+
+    this.onCamPointerDown = (e: PointerEvent): void => {
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.pointers.size === 2) this.pinchDist = this.currentPinchDist();
+      el.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+    this.onCamPointerMove = (e: PointerEvent): void => {
+      const prev = this.pointers.get(e.pointerId);
+      if (!prev) return;
+      const nx = e.clientX;
+      const ny = e.clientY;
+      this.pointers.set(e.pointerId, { x: nx, y: ny });
+      if (this.pointers.size >= 2) {
+        // ピンチズーム（2本指）: 指間距離の比で半径を増減（E5・タッチ合成で検証）。
+        const d = this.currentPinchDist();
+        if (this.pinchDist > 0 && d > 0) zoomBy(this.pinchDist / d);
+        this.pinchDist = d;
+      } else {
+        // スワイプ（1本指 / マウスドラッグ）: 方位・仰角のオービット。
+        orbitFromDelta(nx - prev.x, ny - prev.y);
+      }
+      e.preventDefault();
+    };
+    this.onCamPointerUp = (e: PointerEvent): void => {
+      if (!this.pointers.has(e.pointerId)) return;
+      this.pointers.delete(e.pointerId);
+      // 2→1 本へ減った時に残指を基準へ取り直し、ピンチ↔オービット遷移のジャンプを防ぐ（E9）。
+      this.pinchDist = this.pointers.size === 2 ? this.currentPinchDist() : 0;
+      el.releasePointerCapture?.(e.pointerId);
+    };
+    this.onCamWheel = (e: WheelEvent): void => {
+      zoomBy(Math.exp(e.deltaY * 0.0012)); // ホイールズーム（マウス）
+      e.preventDefault();
+    };
+
+    el.addEventListener('pointerdown', this.onCamPointerDown);
+    el.addEventListener('pointermove', this.onCamPointerMove);
+    el.addEventListener('pointerup', this.onCamPointerUp);
+    el.addEventListener('pointercancel', this.onCamPointerUp);
+    el.addEventListener('wheel', this.onCamWheel, { passive: false });
+
+    // 合格基準のタッチ合成検証で参照する読み取り専用アクセサ（描画層内で完結）。
+    // hidden ペインでは rAF が止まり loop の settle が走らないため、呼び出し時にカメラを
+    // 目標へスナップし clampLabels を再実行してから「落ち着いた既定/オービット視点」を報告する
+    // （SKILL: カメラ検証は手動 settle で）。labels は各席ラベルのクランプ後 NDC。
+    (el as unknown as { __cameraState?: () => unknown }).__cameraState = () => {
+      this.camPos.copy(this.camPosGoal);
+      this.camTarget.copy(this.camTargetGoal);
+      this.camera.position.copy(this.camPos);
+      this.camera.lookAt(this.camTarget);
+      this.camera.updateMatrixWorld();
+      this.clampLabels();
+      const labels: { index: number; visible: boolean; ndc: number[] }[] = [];
+      for (const [index, L] of this.labels) {
+        const n = TMP_A.copy(L.sprite.position).project(this.camera);
+        labels.push({ index, visible: !!L.sprite.visible, ndc: [n.x, n.y] });
+      }
+      return {
+        pos: this.camera.position.toArray(),
+        posGoal: this.camPosGoal.toArray(),
+        target: this.camTargetGoal.toArray(),
+        radius: this.orbitRadius,
+        yaw: this.orbitYaw,
+        pitch: this.orbitPitch,
+        user: this.userControlled,
+        labels,
+      };
+    };
+    // 検証用: 卓面ワールド点(x,0,z)を現カメラで画面座標へ投影し、その座標で dropTargetAt を
+    // 逆引きする。オービット後もレイキャストがカメラへ追従する（E3）ことの確認に使う。
+    (el as unknown as { __dropProbe?: (x: number, z: number) => unknown }).__dropProbe = (x, z) => {
+      const rect = el.getBoundingClientRect();
+      const p = TMP_B.set(x, TABLE_TOP_Y + 0.04, z).project(this.camera);
+      const cx = rect.left + ((p.x + 1) / 2) * rect.width;
+      const cy = rect.top + ((1 - p.y) / 2) * rect.height;
+      return { client: [Math.round(cx), Math.round(cy)], target: this.dropTargetAt(cx, cy) };
+    };
+  }
+
+  private currentPinchDist(): number {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return 0;
+    return Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y);
+  }
+
+  /** 初回のユーザー操作で、現在の見た目のカメラ姿勢からオービット状態を取り込む（滑らかな引き継ぎ）。 */
+  private ensureUserControl(): void {
+    if (this.userControlled) return;
+    this.userControlled = true;
+    const off = TMP_A.subVectors(this.camPos, this.camTarget);
+    const r = off.length() || 7.4;
+    this.orbitRadius = clamp(r, MIN_ORBIT_R, MAX_ORBIT_R);
+    this.orbitPitch = clamp(Math.asin(clamp(off.y / r, -1, 1)), MIN_ORBIT_PITCH, MAX_ORBIT_PITCH);
+    this.orbitYaw = Math.atan2(off.z, off.x);
+    this.orbitTarget.copy(this.camTarget);
+  }
+
+  /** オービット状態（半径・方位・仰角・注視点）からカメラ目標を更新する。loop が滑らかに追従する。 */
+  private applyOrbit(): void {
+    const cosP = Math.cos(this.orbitPitch);
+    this.camPosGoal.set(
+      this.orbitTarget.x + this.orbitRadius * cosP * Math.cos(this.orbitYaw),
+      this.orbitTarget.y + this.orbitRadius * Math.sin(this.orbitPitch),
+      this.orbitTarget.z + this.orbitRadius * cosP * Math.sin(this.orbitYaw),
+    );
+    this.camTargetGoal.copy(this.orbitTarget);
+    this.wake();
+  }
+
+  /** 自席の既定視点へ戻す（HUDのリセットボタンから呼ぶ・契約07項目1）。 */
+  resetView(): void {
+    this.userControlled = false;
+    this.pointers.clear();
+    this.pinchDist = 0;
+    this.aimCameraAt(this.viewYou);
+    this.wake();
+  }
+
   // ---- 描画ループ ---------------------------------------------------------
 
   private loop = (): void => {
@@ -1097,12 +1280,25 @@ export class TableScene {
     this.known.clear();
     for (const obj of this.backPool) obj.group.visible = false;
     this.freshDeal = true;
+    // 新ラウンドは既定視点から始める（項目1: ラウンド開始の自動カメラ演出を維持）。
+    this.userControlled = false;
+    this.pointers.clear();
+    this.pinchDist = 0;
     this.wake();
   }
 
   dispose(): void {
     cancelAnimationFrame(this.raf);
     this.running = false;
+
+    // カメラ操作のイベントリスナ / 検証アクセサを解除（リーク防止）。
+    const cel = this.renderer.domElement as HTMLElement;
+    cel.removeEventListener('pointerdown', this.onCamPointerDown);
+    cel.removeEventListener('pointermove', this.onCamPointerMove);
+    cel.removeEventListener('pointerup', this.onCamPointerUp);
+    cel.removeEventListener('pointercancel', this.onCamPointerUp);
+    cel.removeEventListener('wheel', this.onCamWheel);
+    delete (cel as unknown as { __cameraState?: () => unknown }).__cameraState;
 
     // 演出資源（コンテキストロスト対策・E11）: 光輪 → パーティクル → コンポーザ → 環境マップ
     for (const r of this.rings) {
@@ -1160,7 +1356,13 @@ export class TableScene {
 
 const TMP_A = new THREE.Vector3(); // ループ内の一時ベクトル（毎フレームの new を避ける）
 const TMP_B = new THREE.Vector3(); // clampLabels の投影勾配推定用
+const TMP_R = new THREE.Vector3(); // clampLabels のカメラ右ベクトル（水平押し戻し軸）
 const TMP_HIT = new THREE.Vector3(); // dropTargetAt の交点用（ポインタ処理とループは同時実行されない）
+
+/** 値を [lo, hi] に丸める（オービットのズーム/仰角クランプ用）。 */
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
 function hashId(id: string): number {
   let h = 0;

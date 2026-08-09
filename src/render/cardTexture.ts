@@ -53,31 +53,26 @@ function finalize(canvas: HTMLCanvasElement): THREE.Texture {
   return tex;
 }
 
-/** ピップの座標（相対 0..1）をランクごとに返す。数札は伝統的配置に近い簡略版。 */
-function pipLayout(rank: Rank): [number, number][] {
-  const col = { l: 0.3, c: 0.5, r: 0.7 };
-  const row = { a: 0.2, b: 0.34, c: 0.42, d: 0.5, e: 0.58, f: 0.66, g: 0.8 };
-  const P = (x: number, y: number): [number, number] => [x, y];
-  switch (rank) {
-    case 1: return [P(col.c, col.c ? 0.5 : 0.5)];
-    case 2: return [P(col.c, row.a), P(col.c, row.g)];
-    case 3: return [P(col.c, row.a), P(col.c, row.d), P(col.c, row.g)];
-    case 4: return [P(col.l, row.a), P(col.r, row.a), P(col.l, row.g), P(col.r, row.g)];
-    case 5: return [P(col.l, row.a), P(col.r, row.a), P(col.c, row.d), P(col.l, row.g), P(col.r, row.g)];
-    case 6: return [P(col.l, row.a), P(col.r, row.a), P(col.l, row.d), P(col.r, row.d), P(col.l, row.g), P(col.r, row.g)];
-    case 7: return [P(col.l, row.a), P(col.r, row.a), P(col.c, row.b + 0.04), P(col.l, row.d), P(col.r, row.d), P(col.l, row.g), P(col.r, row.g)];
-    case 8: return [P(col.l, row.a), P(col.r, row.a), P(col.c, row.b + 0.04), P(col.l, row.d), P(col.r, row.d), P(col.c, row.f - 0.04), P(col.l, row.g), P(col.r, row.g)];
-    case 9: return [P(col.l, row.a), P(col.r, row.a), P(col.l, 0.38), P(col.r, 0.38), P(col.c, row.d), P(col.l, 0.62), P(col.r, 0.62), P(col.l, row.g), P(col.r, row.g)];
-    case 10: return [P(col.l, row.a), P(col.r, row.a), P(col.l, 0.33), P(col.r, 0.33), P(col.l, row.d), P(col.r, row.d), P(col.l, 0.67), P(col.r, 0.67), P(col.l, row.g), P(col.r, row.g)];
-    default: return [];
+/** 指定サイズで maxW を超えるなら収まるまでフォントを縮小して中央描画する（"10" 等の2桁対策）。 */
+function fitText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, px: number, maxW: number): void {
+  let size = px;
+  ctx.font = `bold ${size}px Georgia, "Times New Roman", serif`;
+  while (size > 40 && ctx.measureText(text).width > maxW) {
+    size -= 8;
+    ctx.font = `bold ${size}px Georgia, "Times New Roman", serif`;
   }
+  ctx.fillText(text, x, y);
 }
 
+// カード面を「大きな中央ランク + スート」構成で描く（契約07項目3: 視認性最優先）。
+// 伝統的なピップ配置は卓上の遠距離で読み取りづらいため、忠実さより読み取りやすさを優先し
+// 中央に巨大なランク文字とスートを配置する（画面下の 2D 手札カード＝ランク大＋スートの構成と整合）。
 function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
   const red = RED.includes(card.suit);
   const color = red ? '#c0212f' : '#1b1b22';
   const glyph = SUIT_GLYPH[card.suit];
   const label = RANK_LABEL[card.rank];
+  const twoChar = label.length > 1; // "10"
 
   // カード地（角丸・微グラデ・枠）
   ctx.fillStyle = '#f6f4ec';
@@ -94,52 +89,35 @@ function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
   roundRect(ctx, 12, 12, W - 24, H - 24, 44);
   ctx.stroke();
 
-  // 角のランク+スート（上下2箇所）。卓上での視認性を優先し大きめに描く（項目2）。
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
+
+  // 角のランク+スート（上下2箇所・大胆に拡大）。斜めから見ても隅で読めるようにする（項目3）。
   const corner = (x: number, y: number, flip: boolean): void => {
     ctx.save();
     ctx.translate(x, y);
     if (flip) ctx.rotate(Math.PI);
     ctx.textBaseline = 'alphabetic';
-    ctx.font = 'bold 108px Georgia, "Times New Roman", serif';
-    ctx.fillText(label, 0, 0);
-    ctx.font = 'bold 88px Georgia, serif';
-    ctx.fillText(glyph, 0, 90);
+    fitText(ctx, label, 0, 0, twoChar ? 104 : 146, 150);
+    ctx.font = 'bold 112px Georgia, serif';
+    ctx.fillText(glyph, 0, 104);
     ctx.restore();
   };
-  corner(78, 120, false);
-  corner(W - 78, H - 66, true);
+  corner(98, 138, false);
+  corner(W - 98, H - 138, true);
 
-  // 中央: 絵札は大きな文字+スート、数札はピップ、7は強調（いずれも拡大・項目2）。
-  if (card.rank >= 11) {
-    ctx.font = 'bold 236px Georgia, serif';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(label, W / 2, H / 2 - 24);
-    ctx.font = 'bold 138px Georgia, serif';
-    ctx.fillText(glyph, W / 2, H / 2 + 156);
-  } else if (card.rank === 1) {
-    ctx.font = 'bold 336px Georgia, serif';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(glyph, W / 2, H / 2);
-  } else {
-    ctx.textBaseline = 'middle';
-    for (const [px, py] of pipLayout(card.rank)) {
-      const flip = py > 0.5;
-      ctx.save();
-      ctx.translate(px * W, py * H);
-      if (flip) ctx.rotate(Math.PI);
-      ctx.font = 'bold 104px Georgia, serif';
-      ctx.fillText(glyph, 0, 0);
-      ctx.restore();
-    }
-    if (card.rank === 7) {
-      // 単独7でメルドになり得る特別なカード: 淡いハイライトリング
-      ctx.strokeStyle = red ? 'rgba(192,33,47,0.35)' : 'rgba(27,27,34,0.28)';
-      ctx.lineWidth = 8;
-      roundRect(ctx, 40, 40, W - 80, H - 80, 34);
-      ctx.stroke();
-    }
+  // 中央: 巨大なランク + スート。全ランク共通の明快な構成（数札のピップは廃止＝簡素化・項目3）。
+  ctx.textBaseline = 'middle';
+  fitText(ctx, label, W / 2, H * 0.42, 320, W - 176);
+  ctx.font = 'bold 210px Georgia, serif';
+  ctx.fillText(glyph, W / 2, H * 0.74);
+
+  if (card.rank === 7) {
+    // 単独7でメルドになり得る特別なカード: 淡いハイライトリング
+    ctx.strokeStyle = red ? 'rgba(192,33,47,0.35)' : 'rgba(27,27,34,0.28)';
+    ctx.lineWidth = 8;
+    roundRect(ctx, 40, 40, W - 80, H - 80, 34);
+    ctx.stroke();
   }
 }
 
