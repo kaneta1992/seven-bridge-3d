@@ -205,6 +205,20 @@ button.danger {
   border-color: var(--accent-2);
   box-shadow: 0 6px 16px rgba(216, 161, 58, 0.5);
 }
+/* 並び替え可能なカード：ドラッグ中にブラウザのスクロール/ジェスチャへ主導権を奪われないよう
+   touch-action:none を付ける（カード上のスワイプは並び替え優先）。 */
+.card.draggable {
+  cursor: grab;
+  touch-action: none;
+}
+.card.dragging {
+  cursor: grabbing;
+  opacity: 0.92;
+  transform: translateY(-14px) scale(1.06);
+  border-color: var(--accent-2);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.55);
+  z-index: 5;
+}
 .actions {
   display: flex;
   gap: 8px;

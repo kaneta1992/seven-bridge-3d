@@ -47,6 +47,12 @@ export class GameUI {
   private waitInfo: WaitInfo | null = null;
 
   private selected = new Set<string>();
+  // 手札のローカル表示順（cardId の並び）。ユーザーが D&D で決めた相対順序を保持する。
+  // エンジンの手札集合には影響せず（src/core 非改変）、3D と DOM の両方へ同一順序を反映する。
+  private handOrder: string[] = [];
+  // 手札ドラッグ中は driver 由来の再描画（他家アクションのスナップショット等）で .hand DOM が
+  // 作り直されないよう render を保留し、pointerup/cancel 後の render() でまとめて反映する。
+  private dragging = false;
   private lastRound = 0;
   private lastPhaseKey = '';
   private claimKey: string | null = null;
@@ -66,7 +72,7 @@ export class GameUI {
 
   private onResize = (): void => {
     this.scene?.resize();
-    if (this.driver) this.renderScene();
+    if (this.driver) this.renderScene(this.orderedView());
   };
 
   // ---- 画面遷移 ----------------------------------------------------------
@@ -99,6 +105,8 @@ export class GameUI {
     this.driver = null;
     this.stopClaimTimer();
     this.selected.clear();
+    this.handOrder = [];
+    this.dragging = false;
     this.lastRound = 0;
     this.lastPhaseKey = '';
   }
@@ -210,20 +218,51 @@ export class GameUI {
     return view.seats[view.youIndex]?.isCurrent ?? false;
   }
 
-  private renderScene(): void {
-    if (!this.scene || !this.driver) return;
-    this.scene.update(this.currentView(), { selectedIds: this.selected });
+  // 手札をローカル表示順（handOrder）に並べ替えて返す。同時に handOrder を現在の手札集合へ
+  // 追従させる（消えた id を除去し、ツモ等で増えた新規カードはエンジン順のまま末尾へ追加）。
+  // 冪等なので renderScene / render のどちらから呼んでも安全。
+  private applyHandOrder(hand: Card[]): Card[] {
+    const byId = new Map(hand.map((c) => [cardId(c), c] as const));
+    const ordered: Card[] = [];
+    for (const id of this.handOrder) {
+      const c = byId.get(id);
+      if (c) {
+        ordered.push(c);
+        byId.delete(id);
+      }
+    }
+    // 残った id は今回新しく手に入ったカード（ツモ・鳴き後の受け入れ等）→ エンジン順で末尾に足す
+    for (const c of hand) {
+      if (byId.has(cardId(c))) ordered.push(c);
+    }
+    this.handOrder = ordered.map((c) => cardId(c));
+    return ordered;
+  }
+
+  // 手札を表示順に差し替えたビュー（3D と HUD の両方に同一順序を渡すため）。
+  private orderedView(): PlayerView {
+    const view = this.currentView();
+    return { ...view, hand: this.applyHandOrder(view.hand) };
+  }
+
+  private renderScene(view: PlayerView): void {
+    if (!this.scene) return;
+    this.scene.update(view, { selectedIds: this.selected });
   }
 
   private render(): void {
     if (!this.driver || !this.scene) return;
+    // 手札ドラッグ中は再描画を保留（DOM 作り直しでドラッグ・確定順序が失われるのを防ぐ）。
+    // 他家アクションで手札枚数は変わらないため、pointerup/cancel 後の再描画で整合する。
+    if (this.dragging) return;
     const view = this.currentView();
 
-    // ラウンドが進んだらカードを一掃して配札演出を作る
+    // ラウンドが進んだらカードを一掃して配札演出を作る（新配札で並び順もリセット＝自然な新順序）
     if (view.round !== this.lastRound && view.round > 0 && view.phase !== 'gameOver') {
       this.scene.clearCards();
       this.lastRound = view.round;
       this.selected.clear();
+      this.handOrder = [];
     }
     // フェーズ/手番が変わったら選択解除
     const phaseKey = `${view.phase}:${view.youIndex}:${view.round}`;
@@ -232,9 +271,10 @@ export class GameUI {
       this.lastPhaseKey = phaseKey;
     }
 
-    this.renderScene();
-    this.renderHud(view);
-    this.syncClaimTimer(view);
+    const oview: PlayerView = { ...view, hand: this.applyHandOrder(view.hand) };
+    this.renderScene(oview);
+    this.renderHud(oview);
+    this.syncClaimTimer(oview);
   }
 
   private renderHud(view: PlayerView): void {
@@ -319,22 +359,26 @@ export class GameUI {
     const myTurn = this.isMyTurn(view);
     const hand = el('div', { class: 'hand' });
     const canSelect = view.phase === 'awaitingDiscard' && myTurn;
+    // 並び替えは自分の手札が存在する間は常時可能（他家手番・鳴きウィンドウ中も含む）。
+    // 手札を整理する自然な操作を待ち時間中でも許可する。タップ選択は捨てフェーズのみ。
+    const canReorder = view.hand.length > 0;
+    // 自分が操作できる手番（ツモ/捨て）以外は手札を淡く見せて手番でないことを示す（並び替えは可）。
+    const activeTurn = myTurn && (view.phase === 'awaitingDraw' || view.phase === 'awaitingDiscard');
+    // view.hand は既に applyHandOrder 済みの表示順で渡ってくる（3D と一致）。
     for (const c of view.hand) {
       const id = cardId(c);
       const card = el('div', {
-        class: 'card' + (isRed(c) ? ' red' : '') + (this.selected.has(id) ? ' sel' : ''),
+        class:
+          'card' +
+          (isRed(c) ? ' red' : '') +
+          (this.selected.has(id) ? ' sel' : '') +
+          (canReorder ? ' draggable' : ''),
       });
+      card.dataset.cardId = id;
       card.append(el('div', { class: 'big', text: rankText(c) }));
       card.append(el('div', { text: SUIT_GLYPH[c.suit] }));
-      if (canSelect) {
-        card.onclick = () => {
-          if (this.selected.has(id)) this.selected.delete(id);
-          else this.selected.add(id);
-          this.render();
-        };
-      } else {
-        card.style.opacity = '0.85';
-      }
+      if (!activeTurn) card.style.opacity = '0.85';
+      if (canReorder) this.attachHandPointer(card, id, hand, canSelect);
       hand.append(card);
     }
 
@@ -371,6 +415,89 @@ export class GameUI {
     }
 
     return el('div', { class: 'bottom' }, [hand, hint, actions]);
+  }
+
+  // 手札カードの Pointer Events。マウス/タッチ共通で「移動閾値未満＝タップ（選択トグル）/
+  // 閾値以上＝ドラッグ（並び替え）」を判別する。並び替えは兄弟カードの中点を境に DOM を
+  // ライブ挿入し、確定時に DOM 順を handOrder へ取り込んで render() で 3D と DOM を再同期する。
+  // canReorder が真のフェーズ（自手番）でのみ張られ、そこでは driver 由来の自発 re-render が
+  // 起きないため、ドラッグ中に DOM が作り直されて競合することはない（E12/E13）。
+  private attachHandPointer(
+    card: HTMLElement,
+    id: string,
+    hand: HTMLElement,
+    canSelect: boolean,
+  ): void {
+    const THRESHOLD = 8; // タップ/ドラッグ判別のピクセル移動閾値
+    let pointerId = -1;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+
+    card.addEventListener('pointerdown', (e) => {
+      if (pointerId !== -1) return; // 多重ポインタは無視
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      dragging = false;
+      card.setPointerCapture(pointerId);
+    });
+
+    card.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== pointerId) return;
+      if (!dragging && Math.hypot(e.clientX - startX, e.clientY - startY) < THRESHOLD) return;
+      if (!dragging) {
+        dragging = true;
+        card.classList.add('dragging');
+        // ドラッグ中は driver 由来の再描画を保留させる（DOM 作り直し防止）。
+        this.dragging = true;
+      }
+      e.preventDefault();
+      this.reorderDuringDrag(hand, card, e.clientX);
+    });
+
+    const finish = (e: PointerEvent): void => {
+      if (e.pointerId !== pointerId) return;
+      if (card.hasPointerCapture(pointerId)) card.releasePointerCapture(pointerId);
+      pointerId = -1;
+      if (!dragging) {
+        // タップ＝選択トグル（捨てフェーズのみ意味を持つ）
+        if (canSelect) {
+          if (this.selected.has(id)) this.selected.delete(id);
+          else this.selected.add(id);
+          this.render();
+        }
+        return;
+      }
+      // ドラッグ確定：現在の DOM 並びを表示順として取り込み、3D/DOM を再構築で一致させる。
+      card.classList.remove('dragging');
+      this.dragging = false;
+      this.handOrder = Array.from(hand.children)
+        .map((n) => (n as HTMLElement).dataset.cardId)
+        .filter((v): v is string => !!v);
+      // ドラッグ中に保留された driver スナップショットも、この render() でまとめて反映される。
+      this.render();
+    };
+    card.addEventListener('pointerup', finish);
+    card.addEventListener('pointercancel', finish);
+  }
+
+  // ドラッグ中のカードを、兄弟カードの水平中点を基準に挿入位置へ移動する（横1列レイアウト前提）。
+  private reorderDuringDrag(hand: HTMLElement, dragEl: HTMLElement, clientX: number): void {
+    let ref: HTMLElement | null = null;
+    for (const child of Array.from(hand.children) as HTMLElement[]) {
+      if (child === dragEl) continue;
+      const rect = child.getBoundingClientRect();
+      if (clientX < rect.left + rect.width / 2) {
+        ref = child;
+        break;
+      }
+    }
+    if (ref) {
+      if (dragEl.nextSibling !== ref) hand.insertBefore(dragEl, ref);
+    } else if (hand.lastElementChild !== dragEl) {
+      hand.append(dragEl);
+    }
   }
 
   private buildClaimPanel(view: PlayerView): HTMLElement {
