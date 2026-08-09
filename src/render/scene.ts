@@ -27,6 +27,7 @@ interface CardObj {
   removing: boolean;
   removeAt: number;
   spawned: boolean;
+  meldId?: number; // 面カードが 3D メルドに属する場合の所属メルドID（レイキャスト付け札用・R4項目5）
 }
 
 export class TableScene {
@@ -41,6 +42,7 @@ export class TableScene {
   private bodyMat: THREE.MeshStandardMaterial;
   private backMat: THREE.MeshStandardMaterial;
   private frontMatCache = new Map<string, THREE.MeshStandardMaterial>();
+  private raycaster = new THREE.Raycaster(); // 3D メルドの当たり判定（付け札D&D・R4項目5）
 
   // 既知カード（面が判明: 自手札/捨て札/メルド）を cardId で管理
   private known = new Map<string, CardObj>();
@@ -303,7 +305,7 @@ export class TableScene {
               .addScaledVector(tangent, tan)
               .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.05 + ySeq * 0.006, 0));
             ySeq++;
-            this.place(id, card, p, this.flatQuat(seat, 0, true), now, 0, deckPos);
+            this.place(id, card, p, this.flatQuat(seat, 0, true), now, 0, deckPos, meld.id);
           });
           cursor += w + MELD_GAP;
         }
@@ -367,6 +369,7 @@ export class TableScene {
     now: number,
     delay: number,
     spawnPos: THREE.Vector3,
+    meldId?: number,
   ): void {
     let obj = this.known.get(id);
     if (!obj) {
@@ -384,6 +387,7 @@ export class TableScene {
         removing: false,
         removeAt: 0,
         spawned: false,
+        meldId,
       };
       this.known.set(id, obj);
     } else {
@@ -391,7 +395,32 @@ export class TableScene {
       obj.targetQuat.copy(quat);
       obj.removing = false;
       obj.group.scale.setScalar(1);
+      obj.meldId = meldId;
     }
+    // 付け札レイキャスト用にメルド所属をグループへ刻む（非メルドは null）
+    obj.group.userData.meldId = meldId ?? null;
+  }
+
+  /** クライアント座標にある 3D メルドの meldId を返す（無ければ null）。付け札D&D用（R4項目5）。 */
+  meldIdAt(clientX: number, clientY: number): number | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.camera);
+    const groups: THREE.Object3D[] = [];
+    for (const obj of this.known.values()) {
+      if (obj.meldId != null && !obj.removing) groups.push(obj.group);
+    }
+    if (groups.length === 0) return null;
+    const hits = this.raycaster.intersectObjects(groups, true);
+    for (const hit of hits) {
+      let o: THREE.Object3D | null = hit.object;
+      while (o && o.userData?.meldId == null) o = o.parent;
+      const mid = o?.userData?.meldId;
+      if (typeof mid === 'number') return mid;
+    }
+    return null;
   }
 
   private syncBackPool(

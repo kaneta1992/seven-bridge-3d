@@ -9,6 +9,7 @@ declare module 'three' {
   export class Texture { [k: string]: Any; constructor(...a: Any[]); }
   export class CanvasTexture { [k: string]: Any; constructor(...a: Any[]); }
   export class Group { [k: string]: Any; constructor(...a: Any[]); }
+  export class Vector2 { [k: string]: Any; constructor(...a: Any[]); }
   export class Vector3 { [k: string]: Any; constructor(...a: Any[]); }
   export class Quaternion { [k: string]: Any; constructor(...a: Any[]); }
   export class Euler { [k: string]: Any; constructor(...a: Any[]); }
@@ -21,6 +22,8 @@ declare module 'three' {
   export class CircleGeometry { [k: string]: Any; constructor(...a: Any[]); }
   export class MeshStandardMaterial { [k: string]: Any; constructor(...a: Any[]); }
   export class Mesh { [k: string]: Any; constructor(...a: Any[]); }
+  export class Raycaster { [k: string]: Any; constructor(...a: Any[]); }
+  export class Object3D { [k: string]: Any; constructor(...a: Any[]); }
   export class AmbientLight { [k: string]: Any; constructor(...a: Any[]); }
   export class HemisphereLight { [k: string]: Any; constructor(...a: Any[]); }
   export class DirectionalLight { [k: string]: Any; constructor(...a: Any[]); }
