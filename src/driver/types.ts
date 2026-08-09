@@ -35,4 +35,21 @@ export interface GameDriver {
 
   /** 状態変化の購読。戻り値は解除関数。 */
   subscribe(listener: () => void): () => void;
+
+  // ---- 契約03 の後方互換拡張（すべて任意。未実装は既定動作にフォールバック） ----
+
+  /**
+   * この端末がエンジンを実行しホスト専用アクション（startRound / closeWindow / 次ラウンド）を
+   * 発行できる権威を持つか。省略時は true（ホットシート / ホストは true、ゲストは false）。
+   */
+  isAuthority?(): boolean;
+
+  /**
+   * 鳴きウィンドウ満了の絶対時刻（performance.now 基準 ms）。null は非表示。
+   * 省略時は UI が自前で 5 秒を計測する（ホットシート）。ネット実装ではホスト配信の残り時間から算出する。
+   */
+  claimDeadline?(): number | null;
+
+  /** リソース解放（ネットワーク切断など）。省略可。 */
+  dispose?(): void;
 }

@@ -1,13 +1,23 @@
 // ゲーム全体のオーケストレータ。ドライバ境界（GameDriver）越しに 3D シーンと HUD を駆動する。
+// ホットシート（LocalDriver）と通信対戦（HostDriver/GuestDriver）を同じゲーム描画で扱い、
+// 差分は driver の任意メソッド（isAuthority / claimDeadline）で吸収する。
 // エンジンには直接触れず、状態は driver.getView / claimants から受け取る（付け札の可否判定にのみ
 // 純粋関数 canAttach を利用＝ UI アフォーダンス用途で、アクションは必ず driver 経由）。
 import type { Action, Card, PlayerView } from '../core';
 import { canAttach, cardId } from '../core';
 import { LocalDriver } from '../driver/localDriver';
 import type { ClaimOption, GameDriver } from '../driver/types';
+import {
+  generateRoomCode,
+  loadOrCreatePlayerKey,
+  type RosterMember,
+} from '../net/protocol';
+import { NetSession } from '../net/session';
+import { createTrysteroTransport } from '../net/trysteroTransport';
 import { TableScene } from '../render/scene';
 import { clear, el } from './dom';
-import { renderLobby, type LobbyResult } from './lobby';
+import { renderLobby, type CreateRoomConfig, type LobbyResult } from './lobby';
+import { renderConnecting, renderNotice, renderWaitingRoom } from './room';
 import { buildScoreTable } from './scoreTable';
 
 const SUIT_GLYPH: Record<string, string> = { C: '♣', D: '♦', H: '♥', S: '♠' };
@@ -18,6 +28,14 @@ const isRed = (c: Card): boolean => c.suit === 'D' || c.suit === 'H';
 const rankText = (c: Card): string => RANK_LABEL[c.rank] ?? String(c.rank);
 const CLAIM_WINDOW_MS = 5000;
 
+interface WaitInfo {
+  code: string;
+  members: RosterMember[];
+  amHost: boolean;
+  maxPlayers: number;
+  totalRounds: number;
+}
+
 export class GameUI {
   private root: HTMLElement;
   private sceneHost!: HTMLElement;
@@ -25,6 +43,8 @@ export class GameUI {
   private scene: TableScene | null = null;
   private driver: GameDriver | null = null;
   private unsub: (() => void) | null = null;
+  private session: NetSession | null = null;
+  private waitInfo: WaitInfo | null = null;
 
   private selected = new Set<string>();
   private lastRound = 0;
@@ -49,12 +69,25 @@ export class GameUI {
     if (this.driver) this.renderScene();
   };
 
+  // ---- 画面遷移 ----------------------------------------------------------
+
   private showLobby(): void {
     this.teardownGame();
+    this.teardownNet();
     clear(this.root);
     const lobby = el('div', {});
     this.root.append(lobby);
-    renderLobby(lobby, (r) => this.startGame(r));
+    renderLobby(lobby, {
+      onHotseat: (r) => this.startHotseat(r),
+      onCreateRoom: (cfg) => this.createRoom(cfg),
+      onJoinRoom: (code, name) => this.joinRoom(code, name),
+    });
+  }
+
+  private showNotice(title: string, message: string): void {
+    this.teardownGame();
+    clear(this.root);
+    renderNotice(this.root, title, message, () => this.showLobby());
   }
 
   private teardownGame(): void {
@@ -62,13 +95,96 @@ export class GameUI {
     this.unsub = null;
     this.scene?.dispose();
     this.scene = null;
+    this.driver?.dispose?.();
     this.driver = null;
     this.stopClaimTimer();
     this.selected.clear();
     this.lastRound = 0;
+    this.lastPhaseKey = '';
   }
 
-  private startGame(cfg: LobbyResult): void {
+  private teardownNet(): void {
+    this.session?.dispose();
+    this.session = null;
+    this.waitInfo = null;
+  }
+
+  // ---- ホットシート ------------------------------------------------------
+
+  private startHotseat(cfg: LobbyResult): void {
+    const driver = new LocalDriver({ players: cfg.players, totalRounds: cfg.totalRounds });
+    this.beginWithDriver(driver);
+  }
+
+  // ---- 通信対戦: ルーム作成（ホスト） -----------------------------------
+
+  private createRoom(cfg: CreateRoomConfig): void {
+    this.teardownGame();
+    this.teardownNet();
+    const code = generateRoomCode();
+    const pk = loadOrCreatePlayerKey(code);
+    const transport = createTrysteroTransport(code);
+    const session = NetSession.host(code, pk, cfg.name, transport, {
+      maxPlayers: cfg.maxPlayers,
+      totalRounds: cfg.totalRounds,
+    });
+    this.session = session;
+    this.wireSession(session);
+    this.waitInfo = {
+      code,
+      members: [{ pk, name: cfg.name }],
+      amHost: true,
+      maxPlayers: cfg.maxPlayers,
+      totalRounds: cfg.totalRounds,
+    };
+    this.renderWaiting();
+  }
+
+  // ---- 通信対戦: ルーム参加（ゲスト） -----------------------------------
+
+  private joinRoom(code: string, name: string): void {
+    this.teardownGame();
+    this.teardownNet();
+    const pk = loadOrCreatePlayerKey(code);
+    const transport = createTrysteroTransport(code);
+    const session = NetSession.guest(code, pk, name, transport);
+    this.session = session;
+    this.wireSession(session);
+    clear(this.root);
+    renderConnecting(this.root, code, () => this.showLobby());
+  }
+
+  private wireSession(session: NetSession): void {
+    session.on('roster', (members, amHost, info) => {
+      this.waitInfo = { members, amHost, code: info.code, maxPlayers: info.maxPlayers, totalRounds: info.totalRounds };
+      // 対局開始後はゲーム画面を維持（roster は開始前のみ発火）。
+      if (!this.driver) this.renderWaiting();
+    });
+    session.on('started', (driver) => this.beginWithDriver(driver));
+    session.on('error', (message) => this.showNotice('接続できませんでした', message));
+    session.on('fatal', (message) => this.showNotice('ゲーム終了', message));
+  }
+
+  private renderWaiting(): void {
+    if (!this.waitInfo || !this.session) return;
+    const info = this.waitInfo;
+    clear(this.root);
+    renderWaitingRoom(this.root, {
+      code: info.code,
+      members: info.members,
+      amHost: info.amHost,
+      maxPlayers: info.maxPlayers,
+      totalRounds: info.totalRounds,
+      canStart: info.amHost && info.members.length >= 2,
+      onStart: () => this.session?.startGame(),
+      onLeave: () => this.showLobby(),
+    });
+  }
+
+  // ---- ゲーム開始（共通） ------------------------------------------------
+
+  private beginWithDriver(driver: GameDriver): void {
+    this.teardownGame();
     clear(this.root);
     this.sceneHost = el('div', { id: 'scene' });
     this.overlay = el('div', { class: 'overlay' });
@@ -76,10 +192,10 @@ export class GameUI {
     this.root.append(this.sceneHost, this.overlay, this.toastEl);
 
     this.scene = new TableScene(this.sceneHost);
-    this.driver = new LocalDriver({ players: cfg.players, totalRounds: cfg.totalRounds });
-    this.unsub = this.driver.subscribe(() => this.render());
-    // 最初のラウンドを配札（配札演出が走る）
-    void this.driver.dispatch({ type: 'startRound' });
+    this.driver = driver;
+    this.unsub = driver.subscribe(() => this.render());
+    // 権威者（ホットシート/ホスト）だけが最初のラウンドを配る。ゲストはスナップショットで受け取る。
+    if (driver.isAuthority?.() ?? true) void driver.dispatch({ type: 'startRound' });
     this.render();
   }
 
@@ -88,6 +204,10 @@ export class GameUI {
   private currentView(): PlayerView {
     const d = this.driver!;
     return d.getView(d.currentPlayerId());
+  }
+
+  private isMyTurn(view: PlayerView): boolean {
+    return view.seats[view.youIndex]?.isCurrent ?? false;
   }
 
   private renderScene(): void {
@@ -140,7 +260,9 @@ export class GameUI {
     const turnText =
       view.phase === 'meldWindow'
         ? '鳴き受付中…'
-        : `${current?.name ?? '-'} さんの手番`;
+        : view.phase === 'awaitingStart'
+          ? '配札待ち…'
+          : `${current?.name ?? '-'} さんの手番`;
     const scoreBtn = el('button', { text: 'スコア票' });
     scoreBtn.onclick = () => this.openScoreModal(view);
     return el('div', { class: 'topbar' }, [
@@ -157,14 +279,15 @@ export class GameUI {
     const nameOf = (id: string): string => view.seats.find((s) => s.id === id)?.name ?? '?';
     const sel = this.selectedCards(view);
     const attachCard = sel.length === 1 ? sel[0]! : null;
-    // 付け札は自分がメルドを1つ以上公開済みでなければ不可（要件§2.3）。
-    // 未公開プレイヤーには付け札UI（ハイライト・タップ受付）を出さない。
+    // 付け札は自分がメルドを1つ以上公開済みでなければ不可（要件§2.3）。かつ自分の手番中のみ。
+    // 未公開プレイヤー・他家手番には付け札UI（ハイライト・タップ受付）を出さない。
     const meId = this.driver!.currentPlayerId();
     const hasOwnMeld = view.melds.some((m) => m.owner === meId);
+    const myTurn = this.isMyTurn(view);
 
     for (const meld of view.melds) {
       const attachable =
-        hasOwnMeld && attachCard != null && view.phase === 'awaitingDiscard' && canAttach(meld, attachCard);
+        myTurn && hasOwnMeld && attachCard != null && view.phase === 'awaitingDiscard' && canAttach(meld, attachCard);
       const kindLabel = meld.kind === 'lone7' ? '単独7' : meld.kind === 'group' ? '組' : '列';
       const node = el('div', { class: 'meld' + (attachable ? ' attachable' : '') }, [
         el('span', { class: 'owner', text: `${nameOf(meld.owner)}·${kindLabel}` }),
@@ -172,7 +295,7 @@ export class GameUI {
       for (const c of meld.cards) node.append(this.chip(c));
       if (attachable) {
         node.onclick = () =>
-          void this.dispatch({ type: 'attach', player: this.driver!.currentPlayerId(), meldId: meld.id, card: attachCard! }, () =>
+          void this.dispatch({ type: 'attach', player: meId, meldId: meld.id, card: attachCard! }, () =>
             this.selected.clear(),
           );
       }
@@ -193,8 +316,9 @@ export class GameUI {
   }
 
   private buildBottom(view: PlayerView): HTMLElement {
+    const myTurn = this.isMyTurn(view);
     const hand = el('div', { class: 'hand' });
-    const canSelect = view.phase === 'awaitingDiscard';
+    const canSelect = view.phase === 'awaitingDiscard' && myTurn;
     for (const c of view.hand) {
       const id = cardId(c);
       const card = el('div', {
@@ -219,12 +343,15 @@ export class GameUI {
     const me = this.driver!.currentPlayerId();
     const sel = this.selectedCards(view);
 
-    if (view.phase === 'awaitingDraw') {
+    if (!myTurn && (view.phase === 'awaitingDraw' || view.phase === 'awaitingDiscard')) {
+      const current = view.seats.find((s) => s.isCurrent);
+      hint.textContent = `${current?.name ?? '他のプレイヤー'} さんの手番です…`;
+    } else if (myTurn && view.phase === 'awaitingDraw') {
       hint.textContent = '山札から1枚ツモってください。';
       const draw = el('button', { class: 'primary', text: '山札からツモる' });
       draw.onclick = () => void this.dispatch({ type: 'draw', player: me });
       actions.append(draw);
-    } else if (view.phase === 'awaitingDiscard') {
+    } else if (myTurn && view.phase === 'awaitingDiscard') {
       hint.textContent =
         sel.length === 0
           ? 'カードを選択 → メルド公開 / 付け札（場のメルドをタップ）/ 1枚捨てて手番終了。'
@@ -253,6 +380,12 @@ export class GameUI {
     const panel = el('div', { class: 'claim' });
     if (!top || !disc) {
       panel.append(el('div', { class: 'who', text: '鳴き受付中…' }));
+      if (disc) {
+        panel.append(el('div', { class: 'disc' }, ['捨て札: ', this.chip(disc)] as unknown as (Node | string)[]));
+      }
+      const bar = el('div', { class: 'timer' }, [el('i', {})]);
+      this.timerBar = bar.firstElementChild as HTMLElement;
+      panel.append(bar);
       return panel;
     }
     panel.append(el('div', { class: 'who', text: `${top.name} さん、鳴きますか？` }));
@@ -293,9 +426,17 @@ export class GameUI {
       el('h2', { text: winnerName ? `${winnerName} さんが上がり！` : '流局（山札切れ・全員失点）' }),
       buildScoreTable(view),
     ]);
-    const next = el('button', { class: 'primary', text: view.round >= view.totalRounds ? '最終結果へ' : '次のラウンドへ' });
-    next.onclick = () => void this.driver!.dispatch({ type: 'startRound' });
-    modal.append(el('div', { class: 'row' }, [next]));
+    // 次ラウンド開始は権威者（ホットシート/ホスト）のみ。ゲストは待機表示。
+    if (this.driver!.isAuthority?.() ?? true) {
+      const next = el('button', {
+        class: 'primary',
+        text: view.round >= view.totalRounds ? '最終結果へ' : '次のラウンドへ',
+      });
+      next.onclick = () => void this.driver!.dispatch({ type: 'startRound' });
+      modal.append(el('div', { class: 'row' }, [next]));
+    } else {
+      modal.append(el('p', { class: 'hint', text: 'ホストが次のラウンドを開始するまでお待ちください…' }));
+    }
     return el('div', { class: 'center' }, [modal]);
   }
 
@@ -406,10 +547,16 @@ export class GameUI {
       this.stopClaimTimer();
       return;
     }
-    const key = `${view.round}:${view.discardPile.length}:${cardId(view.claimWindow.card)}`;
-    if (key !== this.claimKey) {
-      this.claimKey = key;
-      this.claimDeadline = performance.now() + CLAIM_WINDOW_MS;
+    // ネット実装はホスト配信の残り時間から満了時刻を得る。ホットシートは自前で 5 秒を計測。
+    const provided = this.driver!.claimDeadline?.();
+    if (provided != null) {
+      this.claimDeadline = provided;
+    } else {
+      const key = `${view.round}:${view.discardPile.length}:${cardId(view.claimWindow.card)}`;
+      if (key !== this.claimKey) {
+        this.claimKey = key;
+        this.claimDeadline = performance.now() + CLAIM_WINDOW_MS;
+      }
     }
     if (!this.claimTimer) {
       this.claimTimer = window.setInterval(() => this.tickClaim(), 100);
@@ -420,7 +567,8 @@ export class GameUI {
   private tickClaim(): void {
     const remain = Math.max(0, this.claimDeadline - performance.now());
     if (this.timerBar) this.timerBar.style.width = `${(remain / CLAIM_WINDOW_MS) * 100}%`;
-    if (remain <= 0 && !this.closing) {
+    // ウィンドウ満了の確定は権威者のみ（ゲストはホストの closeWindow 配信を待つ）。
+    if (remain <= 0 && !this.closing && (this.driver!.isAuthority?.() ?? true)) {
       this.closing = true;
       void this.driver!.dispatch({ type: 'closeWindow' }).finally(() => {
         this.closing = false;
