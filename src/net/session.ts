@@ -41,7 +41,10 @@ export class NetSession {
   readonly code: string;
   private readonly selfPk: string;
   private readonly name: string;
-  private readonly transport: Transport;
+  private transport: Transport;
+  /** 復帰時の再join用トランスポート生成器（本番のみ注入。テストは省略＝再announceのみ）。 */
+  private readonly reconnect: (() => Transport) | null;
+  private lastRecoverAt = 0;
   private handlers: Partial<SessionEvents> = {};
 
   // 送信関数（namespace ごとに1回だけ生成）
@@ -69,24 +72,45 @@ export class NetSession {
   private joinTimer = 0;
   private done = false;
 
-  private constructor(role: 'host' | 'guest', code: string, selfPk: string, name: string, transport: Transport) {
+  private constructor(
+    role: 'host' | 'guest',
+    code: string,
+    selfPk: string,
+    name: string,
+    transport: Transport,
+    reconnect: (() => Transport) | null,
+  ) {
     this.role = role;
     this.code = code;
     this.selfPk = selfPk;
     this.name = name;
     this.transport = transport;
+    this.reconnect = reconnect;
     this.wire();
   }
 
-  static host(code: string, selfPk: string, name: string, transport: Transport, opts: HostOpts): NetSession {
-    const s = new NetSession('host', code, selfPk, name, transport);
+  static host(
+    code: string,
+    selfPk: string,
+    name: string,
+    transport: Transport,
+    opts: HostOpts,
+    reconnect: (() => Transport) | null = null,
+  ): NetSession {
+    const s = new NetSession('host', code, selfPk, name, transport, reconnect);
     s.hostOpts = opts;
     s.roster = [{ pk: selfPk, name }];
     return s;
   }
 
-  static guest(code: string, selfPk: string, name: string, transport: Transport): NetSession {
-    const s = new NetSession('guest', code, selfPk, name, transport);
+  static guest(
+    code: string,
+    selfPk: string,
+    name: string,
+    transport: Transport,
+    reconnect: (() => Transport) | null = null,
+  ): NetSession {
+    const s = new NetSession('guest', code, selfPk, name, transport, reconnect);
     s.armJoinTimeout();
     // ホストがいつ接続しても identity を拾えるよう、参加時と各ピア接続時に hello を送る。
     s.sendHello({ pk: selfPk, name });
@@ -116,6 +140,42 @@ export class NetSession {
     this.sendStart({ players, totalRounds: this.hostOpts.totalRounds });
     this.handlers.started?.(this.hostDriver);
     return this.hostDriver;
+  }
+
+  /**
+   * バックグラウンド復帰時の接続自動回復（契約08項目1）。
+   * document.visibilitychange / pageshow / online から呼ぶ。冪等（E3）:
+   *   - 接続生存（ピア有）: 再アナウンスのみ（二重joinしない）
+   *   - 接続喪失（ピア無）かつ再join生成器あり: トランスポートを張り替えて再配線し再アナウンス
+   * 連打（フォーカス往復）はデバウンスで抑制する（E9追補）。
+   */
+  recover(): void {
+    if (this.done) return;
+    const now = Date.now();
+    if (now - this.lastRecoverAt < 1500) return;
+    this.lastRecoverAt = now;
+    const alive = this.transport.getPeers().length > 0;
+    if (!alive && this.reconnect) this.rejoin();
+    else this.reannounce();
+  }
+
+  /** トランスポートを新規生成に張り替え、受信/送信を再配線する（旧接続は leave）。 */
+  private rejoin(): void {
+    const old = this.transport;
+    this.transport = this.reconnect!();
+    this.wire(); // 新トランスポートで sendXxx/受信/onPeerJoin を貼り直す（ハンドシェイクが束縛を再構築）
+    old.leave();
+    this.reannounce();
+  }
+
+  /** 名簿/identity を再送し、ホストは最新スナップショットを再配信する。 */
+  private reannounce(): void {
+    if (this.role === 'guest') {
+      this.sendHello({ pk: this.selfPk, name: this.name });
+    } else {
+      this.broadcastRoster();
+      if (this.started) this.hostDriver?.resendAll();
+    }
   }
 
   /** リソース解放（対局終了/退室時・E9）。 */

@@ -9,9 +9,15 @@ import { LocalDriver } from '../driver/localDriver';
 import type { ClaimOption, GameDriver } from '../driver/types';
 import {
   generateRoomCode,
+  isValidRoomCode,
   loadOrCreatePlayerKey,
+  LOBBY_ROOM,
+  normalizeRoomCode,
+  SEAT_CAP,
+  type RoomAd,
   type RosterMember,
 } from '../net/protocol';
+import { LobbyLink } from '../net/lobbyChannel';
 import { NetSession } from '../net/session';
 import { createTrysteroTransport } from '../net/trysteroTransport';
 import { orderedMeldCards } from '../render/meldSort';
@@ -20,8 +26,9 @@ import { AudioKit } from './audio';
 import { Callouts, countUp } from './callout';
 import { clear, el } from './dom';
 import { renderLobby, type CreateRoomConfig, type LobbyResult } from './lobby';
-import { renderConnecting, renderNotice, renderWaitingRoom } from './room';
+import { renderConnecting, renderJoinPrompt, renderNotice, renderWaitingRoom } from './room';
 import { buildScoreTable } from './scoreTable';
+import { loadPrefs, savePrefs } from './settings';
 
 const SUIT_GLYPH: Record<string, string> = { C: '♣', D: '♦', H: '♥', S: '♠' };
 const RANK_LABEL: Record<number, string> = {
@@ -48,6 +55,9 @@ export class GameUI {
   private unsub: (() => void) | null = null;
   private session: NetSession | null = null;
   private waitInfo: WaitInfo | null = null;
+  // 公開ルーム: ロビー画面の一覧閲覧チャネル（lobbyBrowser）と、ホストの広告チャネル（advertiser）。
+  private lobbyBrowser: LobbyLink | null = null;
+  private advertiser: LobbyLink | null = null;
 
   private selected = new Set<string>();
   // 手札のローカル表示順（cardId の並び）。ユーザーが D&D で決めた相対順序を保持する。
@@ -102,9 +112,16 @@ export class GameUI {
 
   constructor(root: HTMLElement) {
     this.root = root;
-    this.showLobby();
     window.addEventListener('resize', this.onResize);
     window.addEventListener('orientationchange', this.onResize);
+    // バックグラウンド復帰時の自動回復（契約08項目1）。可視化・ページ復帰・オンライン復帰で発火。
+    document.addEventListener('visibilitychange', this.onVisibility);
+    window.addEventListener('pageshow', this.onVisibility);
+    window.addEventListener('online', this.onVisibility);
+    // URL 直行参加（?room=CODE・契約08項目4）。不正コードは無視して通常ロビーへ（E2）。
+    const urlCode = this.roomFromUrl();
+    if (urlCode) this.startUrlJoin(urlCode);
+    else this.showLobby();
   }
 
   private onResize = (): void => {
@@ -112,6 +129,48 @@ export class GameUI {
     if (this.driver) this.renderScene(this.orderedView());
     this.layoutFan(); // 扇形手札を新しいビューポート幅へ再配置
   };
+
+  private onVisibility = (): void => {
+    if (document.visibilityState === 'visible') this.session?.recover();
+  };
+
+  private roomFromUrl(): string | null {
+    try {
+      const raw = new URLSearchParams(location.search).get('room');
+      if (!raw) return null;
+      const code = normalizeRoomCode(raw);
+      return isValidRoomCode(code) ? code : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // URL 直行参加: 保存名があれば即参加、無ければ名前入力を挟む（E2）。参加後URLをクリーンしてループ防止（E12追補）。
+  private startUrlJoin(code: string): void {
+    try {
+      history.replaceState(null, '', location.origin + location.pathname);
+    } catch {
+      /* file:// 等で失敗しても続行 */
+    }
+    const saved = loadPrefs().name.trim();
+    if (saved) {
+      this.joinRoom(code, saved);
+      return;
+    }
+    this.teardownGame();
+    this.teardownNet();
+    clear(this.root);
+    renderJoinPrompt(
+      this.root,
+      code,
+      '',
+      (name) => {
+        savePrefs({ name });
+        this.joinRoom(code, name);
+      },
+      () => this.showLobby(),
+    );
+  }
 
   // ---- 画面遷移 ----------------------------------------------------------
 
@@ -125,7 +184,28 @@ export class GameUI {
       onHotseat: (r) => this.startHotseat(r),
       onCreateRoom: (cfg) => this.createRoom(cfg),
       onJoinRoom: (code, name) => this.joinRoom(code, name),
+      watchPublicRooms: (cb) => this.watchPublicRooms(cb),
     });
+  }
+
+  // 公開ルーム一覧の購読。初回呼び出しで閲覧用ロビーチャネルを遅延生成する（未閲覧なら接続しない）。
+  // チャネル接続失敗はゲーム機能へ波及させず空一覧のまま返す（E4）。
+  private watchPublicRooms(cb: (rooms: RoomAd[]) => void): () => void {
+    if (!this.lobbyBrowser) {
+      try {
+        this.lobbyBrowser = new LobbyLink(createTrysteroTransport(LOBBY_ROOM));
+        this.lobbyBrowser.watch();
+      } catch {
+        cb([]);
+        return () => {};
+      }
+    }
+    return this.lobbyBrowser.onChange(cb);
+  }
+
+  private teardownLobbyBrowser(): void {
+    this.lobbyBrowser?.dispose();
+    this.lobbyBrowser = null;
   }
 
   private showNotice(title: string, message: string): void {
@@ -187,12 +267,15 @@ export class GameUI {
   private teardownNet(): void {
     this.session?.dispose();
     this.session = null;
+    this.advertiser?.dispose();
+    this.advertiser = null;
     this.waitInfo = null;
   }
 
   // ---- ホットシート ------------------------------------------------------
 
   private startHotseat(cfg: LobbyResult): void {
+    this.teardownLobbyBrowser();
     const driver = new LocalDriver({ players: cfg.players, totalRounds: cfg.totalRounds });
     this.beginWithDriver(driver);
   }
@@ -202,23 +285,50 @@ export class GameUI {
   private createRoom(cfg: CreateRoomConfig): void {
     this.teardownGame();
     this.teardownNet();
+    this.teardownLobbyBrowser();
     const code = generateRoomCode();
     const pk = loadOrCreatePlayerKey(code);
     const transport = createTrysteroTransport(code);
-    const session = NetSession.host(code, pk, cfg.name, transport, {
-      maxPlayers: cfg.maxPlayers,
-      totalRounds: cfg.totalRounds,
-    });
+    const session = NetSession.host(
+      code,
+      pk,
+      cfg.name,
+      transport,
+      { maxPlayers: SEAT_CAP, totalRounds: cfg.totalRounds },
+      () => createTrysteroTransport(code),
+    );
     this.session = session;
     this.wireSession(session);
     this.waitInfo = {
       code,
       members: [{ pk, name: cfg.name }],
       amHost: true,
-      maxPlayers: cfg.maxPlayers,
+      maxPlayers: SEAT_CAP,
       totalRounds: cfg.totalRounds,
     };
+    // 公開ONなら固定ロビーチャネルへ広告を開始（開始/満員/解散で停止）。広告は4項目のみ（不変条件）。
+    if (cfg.isPublic) {
+      try {
+        this.advertiser = new LobbyLink(createTrysteroTransport(LOBBY_ROOM));
+        this.advertiser.startAdvertising(() => this.currentRoomAd());
+      } catch {
+        this.advertiser = null; // 広告失敗はゲーム進行に影響させない（E4）
+      }
+    }
     this.renderWaiting();
+  }
+
+  // 広告ペイロード。待機中かつ未満員のときだけ値を返し、開始/満員では null（送信停止→TTL失効・E10追補）。
+  private currentRoomAd(): RoomAd | null {
+    const info = this.waitInfo;
+    if (!info || !info.amHost || this.driver) return null; // driver 有＝対局開始後
+    if (info.members.length >= SEAT_CAP) return null; // 満員は載せない
+    return {
+      code: info.code,
+      hostName: info.members[0]?.name ?? 'ホスト',
+      count: info.members.length,
+      rounds: info.totalRounds,
+    };
   }
 
   // ---- 通信対戦: ルーム参加（ゲスト） -----------------------------------
@@ -226,9 +336,10 @@ export class GameUI {
   private joinRoom(code: string, name: string): void {
     this.teardownGame();
     this.teardownNet();
+    this.teardownLobbyBrowser();
     const pk = loadOrCreatePlayerKey(code);
     const transport = createTrysteroTransport(code);
-    const session = NetSession.guest(code, pk, name, transport);
+    const session = NetSession.guest(code, pk, name, transport, () => createTrysteroTransport(code));
     this.session = session;
     this.wireSession(session);
     clear(this.root);
@@ -241,7 +352,12 @@ export class GameUI {
       // 対局開始後はゲーム画面を維持（roster は開始前のみ発火）。
       if (!this.driver) this.renderWaiting();
     });
-    session.on('started', (driver) => this.beginWithDriver(driver));
+    session.on('started', (driver) => {
+      // 対局開始で公開広告を停止（TTL失効で一覧から消える・E10追補）。ロビー接続も閉じる。
+      this.advertiser?.dispose();
+      this.advertiser = null;
+      this.beginWithDriver(driver);
+    });
     session.on('error', (message) => this.showNotice('接続できませんでした', message));
     session.on('fatal', (message) => this.showNotice('ゲーム終了', message));
   }

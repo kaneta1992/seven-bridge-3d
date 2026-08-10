@@ -45,10 +45,36 @@ export function renderWaitingRoom(root: HTMLElement, p: WaitingRoomProps): void 
   (codeBox as HTMLElement).style.letterSpacing = '6px';
   (codeBox as HTMLElement).style.fontWeight = '800';
 
+  // 一時トースト（共有/コピーのフィードバック。待機ルームは GameUI のトーストを持たないため自前で出す）。
+  const toastEl = el('div', { class: 'toast' });
+  let toastTimer = 0;
+  const toast = (msg: string): void => {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), 2200);
+  };
+
   const copyBtn = el('button', { text: 'コードをコピー' });
   copyBtn.onclick = () => {
     void navigator.clipboard?.writeText(p.code).catch(() => undefined);
-    copyBtn.textContent = 'コピーしました';
+    toast('コードをコピーしました');
+  };
+
+  // 共有導線（契約08項目4）: 招待URL `origin/path?room=CODE` を Web Share、非対応はクリップボード。
+  const shareUrl = `${location.origin}${location.pathname}?room=${p.code}`;
+  const shareText = `セブンブリッジ3D で対戦しよう！ ルームコード: ${p.code}`;
+  const shareBtn = el('button', { class: 'gold', text: '共有' });
+  shareBtn.onclick = () => {
+    const nav = navigator as Navigator & { share?: (d: ShareData) => Promise<void> };
+    if (typeof nav.share === 'function') {
+      void nav.share({ title: 'セブンブリッジ 3D', text: shareText, url: shareUrl }).catch(() => undefined);
+      return;
+    }
+    void navigator.clipboard
+      ?.writeText(shareUrl)
+      .then(() => toast('招待リンクをコピーしました'))
+      .catch(() => toast('コピーできませんでした'));
   };
 
   const actions = el('div', { class: 'row' });
@@ -67,10 +93,37 @@ export function renderWaitingRoom(root: HTMLElement, p: WaitingRoomProps): void 
 
   const modal = el('div', { class: 'modal' }, [
     el('h1', { text: '待機ルーム' }),
-    el('div', { class: 'row' }, [el('label', { text: 'ルームコード' }), codeBox, copyBtn]),
+    el('div', { class: 'row' }, [el('label', { text: 'ルームコード' }), codeBox, copyBtn, shareBtn]),
     el('h2', { text: `参加者 ${p.members.length}/${p.maxPlayers}・${p.totalRounds}ラウンド` }),
     list,
     actions,
+    el('p', {
+      class: 'hint',
+      text: 'モバイルで画面を切り替えると一時的に部屋が見えなくなることがあります。戻れば自動で復帰します。',
+    }),
+  ]);
+  root.append(el('div', { class: 'center' }, [modal, toastEl]));
+}
+
+/** URL（?room=CODE）参加で保存名が無いときの名前入力（契約08項目4・E2）。 */
+export function renderJoinPrompt(
+  root: HTMLElement,
+  code: string,
+  defaultName: string,
+  onJoin: (name: string) => void,
+  onCancel: () => void,
+): void {
+  clear(root);
+  const input = el('input', { type: 'text', maxlength: '10', value: defaultName, placeholder: 'あなたの名前' }) as HTMLInputElement;
+  const join = el('button', { class: 'primary', text: '参加' });
+  join.onclick = () => onJoin((input.value.trim() || 'ゲスト').slice(0, 10));
+  const cancel = el('button', { text: 'キャンセル' });
+  cancel.onclick = onCancel;
+  const modal = el('div', { class: 'modal' }, [
+    el('h1', { text: 'ルームに参加' }),
+    el('h2', { text: `ルームコード ${code}` }),
+    el('div', { class: 'field' }, [el('label', { text: 'あなたの名前' }), input]),
+    el('div', { class: 'row' }, [join, cancel]),
   ]);
   root.append(el('div', { class: 'center' }, [modal]));
 }

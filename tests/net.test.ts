@@ -8,9 +8,10 @@ import { cardId } from '../src/core';
 import type { GameDriver } from '../src/driver/types';
 import { GuestDriver } from '../src/net/guestDriver';
 import { HostDriver } from '../src/net/hostDriver';
-import { NS, type SnapshotMsg, type StartMsg } from '../src/net/protocol';
+import { LobbyLink } from '../src/net/lobbyChannel';
+import { NS, sanitizeRoomAd, type RoomAd, type SnapshotMsg, type StartMsg } from '../src/net/protocol';
 import { NetSession } from '../src/net/session';
-import { MockHub, settle } from './netHelpers';
+import { MockHub, MockNode, settle } from './netHelpers';
 
 const ROSTER = [
   { id: 'h', name: 'H' },
@@ -287,5 +288,83 @@ describe('NetSession 統合（インメモリ・トランスポート）', () =>
 
     hostS.dispose();
     g1S.dispose();
+  });
+
+  it('復帰: recover は接続生存中なら再アナウンスのみで冪等（二重join/名簿重複なし・E3/E9）', async () => {
+    const hub = new MockHub();
+    const hostT = hub.create('hostPeer');
+    const g1T = hub.create('g1Peer');
+    const hostS = NetSession.host('ABC238', 'h', 'H', hostT, { maxPlayers: 6, totalRounds: 1 });
+    const g1S = NetSession.guest('ABC238', 'g1', 'G1', g1T);
+    let roster: { pk: string }[] = [];
+    hostS.on('roster', (m) => (roster = m));
+
+    await settle();
+    expect(roster.map((m) => m.pk).sort()).toEqual(['g1', 'h']);
+
+    // 接続生存中（ピア有）の復帰: 別セッションを個別に一度だけ recover → 再announceのみ。
+    g1S.recover();
+    hostS.recover();
+    await settle();
+    // 名簿は重複せず 2 人のまま（冪等）。reconnect 未注入なのでトランスポートは張り替わらない。
+    expect(roster.map((m) => m.pk).sort()).toEqual(['g1', 'h']);
+    expect((hostT as MockNode).left).toBe(false);
+    expect((g1T as MockNode).left).toBe(false);
+
+    hostS.dispose();
+    g1S.dispose();
+  });
+});
+
+describe('LobbyLink 公開ロビー（固定チャネル広告）', () => {
+  it('広告は {code,hostName,count,rounds} の4項目のみが伝わり、余分な項目は載らない（E5-lobby）', async () => {
+    const hub = new MockHub();
+    const advT = hub.create('advPeer');
+    const viewT = hub.create('viewPeer');
+    const adv = new LobbyLink(advT);
+    const view = new LobbyLink(viewT);
+    // 汚染広告（手札や個人情報を模した余分フィールド）を送っても、送受信でサニタイズされる。
+    adv.startAdvertising(
+      () => ({ code: 'ABC234', hostName: 'H', count: 2, rounds: 4, secret: 'x', hand: [1, 2] }) as unknown as RoomAd,
+    );
+    await settle();
+    const rooms = view.getRooms();
+    expect(rooms.length).toBe(1);
+    expect(Object.keys(rooms[0]!).sort()).toEqual(['code', 'count', 'hostName', 'rounds']);
+    expect(rooms[0]).toEqual({ code: 'ABC234', hostName: 'H', count: 2, rounds: 4 });
+
+    adv.dispose();
+    view.dispose();
+  });
+
+  it('TTL 失効で一覧から消える（開始/解散/満員での広告停止＝自然消滅・E1）', async () => {
+    const hub = new MockHub();
+    const advT = hub.create('advPeer');
+    const viewT = hub.create('viewPeer');
+    let clock = 1000;
+    const view = new LobbyLink(viewT, { now: () => clock });
+    const adv = new LobbyLink(advT);
+    adv.startAdvertising(() => ({ code: 'ABC234', hostName: 'H', count: 2, rounds: 4 }));
+    await settle();
+    expect(view.getRooms().length).toBe(1);
+
+    // 広告停止（対局開始/解散/満員）→ 更新が止まり TTL 経過で失効。
+    adv.stopAdvertising();
+    clock += 9000; // AD_TTL_MS(8000) 超過
+    expect(view.getRooms().length).toBe(0);
+
+    adv.dispose();
+    view.dispose();
+  });
+
+  it('sanitizeRoomAd: 不正コード/型不一致は破棄し、人数・ラウンドは範囲内へ丸める（E4）', () => {
+    expect(sanitizeRoomAd({ code: 'bad', hostName: 'H', count: 2, rounds: 4 })).toBeNull();
+    expect(sanitizeRoomAd({ code: 'ABC234', hostName: 'H', count: 99, rounds: 0 })).toEqual({
+      code: 'ABC234',
+      hostName: 'H',
+      count: 6,
+      rounds: 1,
+    });
+    expect(sanitizeRoomAd(null)).toBeNull();
   });
 });

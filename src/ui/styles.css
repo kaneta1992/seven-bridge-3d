@@ -872,6 +872,32 @@ table.score td.win {
   line-height: 1.5;
 }
 
+/* 公開ルーム一覧（縦積み・各行は名前/人数/ラウンド/参加ボタン） */
+.public-rooms {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  align-items: stretch;
+}
+.public-room {
+  align-items: center;
+  gap: 8px;
+}
+.public-room .owner {
+  flex: 1 1 auto;
+  font-size: 14px;
+  color: var(--text);
+  margin-right: 0;
+}
+.public-room .pill {
+  flex: 0 0 auto;
+}
+.public-room .primary {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 6px 14px;
+}
+
 @media (orientation: portrait) {
   .modal.lobby {
     padding: 20px 18px 18px;

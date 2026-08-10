@@ -7,6 +7,19 @@ import type { Action, PlayerView } from '../core';
 /** Trystero appId（この抽象化された名前空間の中でルームコードを部屋IDにする）。 */
 export const APP_ID = 'seven-bridge-3d-v1';
 
+/**
+ * 席上限（内部定数・要件§3.1「人数は開始時確定」）。作成UIから人数指定は撤去し、
+ * ホストが開始した時点の名簿人数で確定する。満員拒否はこの値で行う。
+ */
+export const SEAT_CAP = 6;
+
+/**
+ * 公開ルーム広告用の固定ロビーチャネルの roomId（公開ロビー・要件§3.1）。
+ * generateRoomCode は CODE_ALPHABET の6桁しか生成しないため、ハイフンを含む長い ID は
+ * 通常コード空間と衝突しない（予約チャネル）。password も同値で E2E するが広告は公開情報のみ。
+ */
+export const LOBBY_ROOM = 'seven-lobby-public-v1';
+
 /** 鳴き受付ウィンドウ長（ホスト権威のタイマー基準・要件 D6）。app.ts と一致させる。 */
 export const CLAIM_WINDOW_MS = 10000;
 
@@ -121,6 +134,36 @@ export interface AckMsg {
 /** ホスト→特定ピア: 入室拒否（満員/対局開始後の途中参加・E1）。 */
 export interface RejectMsg {
   reason: string;
+}
+
+/**
+ * 公開ロビーへの広告ペイロード（公開ルーム一覧・要件§3.1）。
+ * **この4項目以外を載せない**（契約08不変条件・個人情報/手札情報を含めない）。
+ * TTL 失効は受信側がローカルの到着時刻で管理し、ペイロードに時刻を入れない。
+ */
+export interface RoomAd {
+  code: string;
+  hostName: string;
+  count: number;
+  rounds: number;
+}
+
+/** 広告名前空間（固定ロビーチャネル）。 */
+export const LOBBY_NS = 'ad';
+
+/**
+ * 受信広告を4項目のみへ整形し妥当性検証する（外部由来ペイロードの防御・E5-lobby/E4）。
+ * 型不一致・コード不正・異常人数は null（破棄）。ここを通ったものだけが一覧に載る。
+ */
+export function sanitizeRoomAd(raw: unknown): RoomAd | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const code = typeof r.code === 'string' ? normalizeRoomCode(r.code) : '';
+  if (!isValidRoomCode(code)) return null;
+  const hostName = typeof r.hostName === 'string' ? r.hostName.slice(0, 10) : '';
+  const count = typeof r.count === 'number' && Number.isFinite(r.count) ? Math.max(0, Math.min(SEAT_CAP, Math.round(r.count))) : 0;
+  const rounds = typeof r.rounds === 'number' && Number.isFinite(r.rounds) ? Math.max(1, Math.min(99, Math.round(r.rounds))) : 1;
+  return { code, hostName, count, rounds };
 }
 
 /** Trystero makeAction の名前空間（12バイト以内）。 */

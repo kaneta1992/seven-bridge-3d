@@ -133,6 +133,11 @@ export class HostDriver implements GameDriver {
     this.deps.sendSnap(peerId, this.snapshotFor(pk));
   }
 
+  /** 復帰時（visibilitychange）に全ゲストへ最新スナップショットを再配信する（契約08項目1）。 */
+  resendAll(): void {
+    this.broadcast();
+  }
+
   /** 現在の権威状態のプレイヤー視点ビュー（ホスト UI 用に外へ渡すためのアクセサ）。 */
   snapshotView(pk: string): PlayerView {
     return deriveViewFor(this.state, pk);

@@ -1,7 +1,7 @@
 // タイトル/ロビー画面（要件 §3.3-1）。3導線: ホットシート / ルーム作成（通信対戦）/ ルーム参加。
 // モダンなカードUI + タブ + ブランドマーク（すべてシステムフォント/プロシージャル・外部アセットなし）。
 // 名前・人数・ラウンド数は localStorage に永続化し、次回起動時に自動復元する（項目6/7）。
-import { normalizeRoomCode } from '../net/protocol';
+import { normalizeRoomCode, SEAT_CAP, type RoomAd } from '../net/protocol';
 import { clear, el } from './dom';
 import { loadPrefs, savePrefs } from './settings';
 
@@ -12,26 +12,28 @@ export interface LobbyResult {
 
 export interface CreateRoomConfig {
   name: string;
-  maxPlayers: number;
   totalRounds: number;
+  isPublic: boolean;
 }
 
 export interface LobbyCallbacks {
   onHotseat: (r: LobbyResult) => void;
   onCreateRoom: (cfg: CreateRoomConfig) => void;
   onJoinRoom: (code: string, name: string) => void;
+  /** 公開ルーム一覧の購読（未提供なら公開タブは空表示・E4）。戻り値は解除関数。 */
+  watchPublicRooms?: (cb: (rooms: RoomAd[]) => void) => () => void;
 }
 
 const DEFAULT_NAMES = ['あかり', 'はると', 'つむぎ', 'ゆうと', 'さくら', 'そうた'];
 const ROUND_CHOICES = [1, 2, 3, 4, 6, 8, 12, 20];
-type Mode = 'hotseat' | 'create' | 'join';
+type Mode = 'hotseat' | 'create' | 'join' | 'public';
 
 // 画面内で共有する設定状態（名前はモード切替をまたいで引き継ぎ、submit で永続化する）。
 interface LobbyState {
   name: string;
-  maxPlayers: number;
   rounds: number;
   hotseatCount: number;
+  isPublic: boolean;
 }
 
 export function renderLobby(root: HTMLElement, cb: LobbyCallbacks): void {
@@ -39,18 +41,21 @@ export function renderLobby(root: HTMLElement, cb: LobbyCallbacks): void {
   const prefs = loadPrefs();
   const state: LobbyState = {
     name: prefs.name,
-    maxPlayers: prefs.maxPlayers,
     rounds: ROUND_CHOICES.includes(prefs.rounds) ? prefs.rounds : 4,
     hotseatCount: prefs.hotseatCount,
+    isPublic: false,
   };
   let mode: Mode = 'create';
+  // 公開タブを離れたら一覧購読を解除する（対局中にロビー接続を残さない・E11追補）。
+  let unwatch: (() => void) | null = null;
 
   const modeSeg = el('div', { class: 'seg tabs' });
   const body = el('div', { class: 'lobby-body' });
   const modeBtns: Record<Mode, HTMLButtonElement> = {} as Record<Mode, HTMLButtonElement>;
   const modes: { key: Mode; label: string }[] = [
     { key: 'create', label: 'ルーム作成' },
-    { key: 'join', label: 'ルーム参加' },
+    { key: 'public', label: '公開ルーム' },
+    { key: 'join', label: 'コードで参加' },
     { key: 'hotseat', label: 'ホットシート' },
   ];
   for (const m of modes) {
@@ -65,9 +70,12 @@ export function renderLobby(root: HTMLElement, cb: LobbyCallbacks): void {
   }
 
   const renderBody = (): void => {
+    unwatch?.();
+    unwatch = null;
     clear(body);
     if (mode === 'hotseat') body.append(hotseatForm(cb, state));
     else if (mode === 'create') body.append(createForm(cb, state));
+    else if (mode === 'public') unwatch = publicList(body, cb, state);
     else body.append(joinForm(cb, state));
   };
 
@@ -93,28 +101,71 @@ export function renderLobby(root: HTMLElement, cb: LobbyCallbacks): void {
 function createForm(cb: LobbyCallbacks, state: LobbyState): HTMLElement {
   const nameInput = nameField(state);
 
-  const countSeg = segSelect(
-    Array.from({ length: 5 }, (_, i) => i + 2),
-    state.maxPlayers,
-    (n) => (state.maxPlayers = n),
-    (n) => `${n}人`,
-  );
   const roundSeg = segSelect(ROUND_CHOICES, state.rounds, (r) => (state.rounds = r), String);
+  const publicToggle = toggle(state.isPublic, (v) => (state.isPublic = v));
 
   const startBtn = el('button', { class: 'primary', text: 'ルームを作成して待機' }) as HTMLButtonElement;
   startBtn.onclick = () => {
     const name = cleanName(state.name, 'ホスト');
-    savePrefs({ name, maxPlayers: state.maxPlayers, rounds: state.rounds });
-    cb.onCreateRoom({ name, maxPlayers: state.maxPlayers, totalRounds: state.rounds });
+    savePrefs({ name, rounds: state.rounds });
+    cb.onCreateRoom({ name, totalRounds: state.rounds, isPublic: state.isPublic });
   };
 
+  // 人数はゲーム開始時に確定（要件§3.1）。作成UIから人数指定は撤去し、席上限 SEAT_CAP のみ内部で持つ。
   return el('div', {}, [
     field('あなたの名前', nameInput),
-    field('人数上限', countSeg),
     field('ラウンド数', roundSeg),
+    field('公開ルームにする', publicToggle),
     el('div', { class: 'row actions-row' }, [startBtn]),
-    el('p', { class: 'hint', text: '作成後、6桁のルームコードを友だちに共有してください。' }),
+    el('p', {
+      class: 'hint',
+      text: `開始時の参加者数で対局人数が決まります（2〜${SEAT_CAP}人）。公開ONで一覧に載り、コード不要で参加できます。`,
+    }),
   ]);
+}
+
+// ---- 公開ルーム一覧（ワンタップ参加） ------------------------------------
+
+function publicList(body: HTMLElement, cb: LobbyCallbacks, state: LobbyState): () => void {
+  const nameInput = nameField(state);
+  const listWrap = el('div', { class: 'melds public-rooms' });
+  const empty = el('p', { class: 'hint', text: '公開ルームを探しています…' });
+
+  const render = (rooms: RoomAd[]): void => {
+    clear(listWrap);
+    if (rooms.length === 0) {
+      listWrap.append(empty);
+      return;
+    }
+    for (const r of rooms) {
+      const full = r.count >= SEAT_CAP;
+      const join = el('button', { class: 'primary', text: full ? '満員' : '参加' }) as HTMLButtonElement;
+      join.disabled = full;
+      join.onclick = () => {
+        const name = cleanName(state.name, 'ゲスト');
+        savePrefs({ name });
+        cb.onJoinRoom(r.code, name);
+      };
+      listWrap.append(
+        el('div', { class: 'meld public-room' }, [
+          el('span', { class: 'owner', text: `${r.hostName}さんの卓` }),
+          el('span', { class: 'pill', text: `${r.count}/${SEAT_CAP}人` }),
+          el('span', { class: 'pill', text: `${r.rounds}R` }),
+          join,
+        ]),
+      );
+    }
+  };
+
+  const wrap = el('div', {}, [
+    field('あなたの名前', nameInput),
+    el('h2', { text: '公開中のルーム' }),
+    listWrap,
+  ]);
+  body.append(wrap);
+  render([]);
+  // E4: 購読が無い（ロビーチャネル未接続）なら空表示のまま。
+  return cb.watchPublicRooms ? cb.watchPublicRooms(render) : () => {};
 }
 
 // ---- 通信対戦: ルーム参加 -------------------------------------------------
@@ -225,6 +276,28 @@ function textInput(value: string, placeholder = ''): HTMLInputElement {
 
 function cleanName(raw: string, fallback: string): string {
   return (raw.trim() || fallback).slice(0, 10);
+}
+
+/** ON/OFF トグル（公開ルーム設定用。seg と同じ見た目のピル2択で実装＝新規CSS不要）。 */
+function toggle(initial: boolean, onChange: (v: boolean) => void): HTMLElement {
+  const seg = el('div', { class: 'seg' });
+  const off = el('button', { text: 'しない' }) as HTMLButtonElement;
+  const on = el('button', { text: '公開する' }) as HTMLButtonElement;
+  const paint = (v: boolean): void => {
+    on.classList.toggle('on', v);
+    off.classList.toggle('on', !v);
+  };
+  off.onclick = () => {
+    onChange(false);
+    paint(false);
+  };
+  on.onclick = () => {
+    onChange(true);
+    paint(true);
+  };
+  paint(initial);
+  seg.append(off, on);
+  return seg;
 }
 
 function segSelect<T extends number>(
