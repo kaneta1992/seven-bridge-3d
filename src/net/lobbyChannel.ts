@@ -32,6 +32,9 @@ export class LobbyLink {
     const [send, recv] = transport.makeAction<RoomAd>(LOBBY_NS);
     this.send = send;
     recv((raw) => this.onAd(raw));
+    // 閲覧者がロビーへ入った瞬間に広告を即送する（定期間隔の待ちやモバイルのタイマー
+    // 抑制に依存しない・2026-08-11）。広告していない側では postAd が no-op。
+    transport.onPeerJoin(() => this.postAd());
   }
 
   // ---- ホスト側（広告送信） ---------------------------------------------

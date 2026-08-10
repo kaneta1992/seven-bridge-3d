@@ -44,3 +44,4 @@ declare module 'three/examples/jsm/geometries/RoundedBoxGeometry.js' {
 }
 
 declare module '*.css';
+declare const __BUILD_ID__: string;

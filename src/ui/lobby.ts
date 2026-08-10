@@ -2,6 +2,7 @@
 // モダンなカードUI + タブ + ブランドマーク（すべてシステムフォント/プロシージャル・外部アセットなし）。
 // 名前・人数・ラウンド数は localStorage に永続化し、次回起動時に自動復元する（項目6/7）。
 import { normalizeRoomCode, SEAT_CAP, type RoomAd } from '../net/protocol';
+import { relayStatus } from '../net/trysteroTransport';
 import { clear, el } from './dom';
 import { loadPrefs, savePrefs } from './settings';
 
@@ -157,15 +158,31 @@ function publicList(body: HTMLElement, cb: LobbyCallbacks, state: LobbyState): (
     }
   };
 
+  // 診断行（2026-08-11）: ビルドIDとリレー接続数。遠隔サポート時に
+  // 「古いキャッシュか」「ネットワークがリレーをブロックしているか」を一目で切り分ける。
+  const diag = el('p', { class: 'hint diag', text: '' });
+  const paintDiag = (): void => {
+    const rs = relayStatus();
+    const warn = rs.connected === 0 ? ' ⚠ リレーに接続できていません（ネットワーク制限の可能性）' : '';
+    diag.textContent = `接続リレー ${rs.connected}/${rs.total} ・ build ${__BUILD_ID__}${warn}`;
+  };
+  paintDiag();
+  const diagTimer = window.setInterval(paintDiag, 2000);
+
   const wrap = el('div', {}, [
     field('あなたの名前', nameInput),
     el('h2', { text: '公開中のルーム' }),
     listWrap,
+    diag,
   ]);
   body.append(wrap);
   render([]);
   // E4: 購読が無い（ロビーチャネル未接続）なら空表示のまま。
-  return cb.watchPublicRooms ? cb.watchPublicRooms(render) : () => {};
+  const unwatch = cb.watchPublicRooms ? cb.watchPublicRooms(render) : (): void => {};
+  return () => {
+    window.clearInterval(diagTimer);
+    unwatch();
+  };
 }
 
 // ---- 通信対戦: ルーム参加 -------------------------------------------------

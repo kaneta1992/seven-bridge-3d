@@ -1,7 +1,9 @@
 // Trystero（WebRTC P2P・公共シグナリング）を Transport 境界へ写像する唯一の場所。
 // ここ以外は trystero に依存しない。デフォルト strategy（Nostr）を使い、GitHub Pages（静的HTTPS）で動作する。
 // 独自シグナリングサーバーは導入しない（契約03）。
-import { joinRoom, selfId } from 'trystero';
+// 'trystero' の既定 strategy は nostr（index.js は nostr.js の再export）。型定義が完全な
+// サブパス 'trystero/nostr' から import する（getRelaySockets の型は index.d.ts に無いため）。
+import { getRelaySockets, joinRoom, selfId } from 'trystero/nostr';
 import { APP_ID, type Sender, type Receiver, type Transport } from './protocol';
 
 /**
@@ -28,7 +30,9 @@ const RELAY_URLS = [
  */
 export function createTrysteroTransport(code: string): Transport {
   const room = joinRoom(
-    { appId: APP_ID, password: code, relayUrls: RELAY_URLS, relayRedundancy: 5 },
+    // 冗長度は全リレー: ネットワークごとの到達性差（企業/モバイル網のブロック等）に対する
+    // 生存率を最大化する（2026-08-11 公開ルーム不可視の環境差対応）。
+    { appId: APP_ID, password: code, relayUrls: RELAY_URLS, relayRedundancy: RELAY_URLS.length },
     code,
   );
 
@@ -57,4 +61,19 @@ export function createTrysteroTransport(code: string): Transport {
       void Promise.resolve(room.leave()).catch(() => undefined);
     },
   };
+}
+
+/**
+ * リレー接続状況（診断用・2026-08-11）。接続済み/総数を返す。
+ * ロビー画面の診断表示に使い、「リレー0/8」ならネットワークがリレーをブロックしていると判る。
+ */
+export function relayStatus(): { connected: number; total: number } {
+  try {
+    const sockets = getRelaySockets();
+    const urls = Object.keys(sockets);
+    const connected = urls.filter((u) => sockets[u]?.readyState === 1).length;
+    return { connected, total: RELAY_URLS.length };
+  } catch {
+    return { connected: 0, total: RELAY_URLS.length };
+  }
 }
