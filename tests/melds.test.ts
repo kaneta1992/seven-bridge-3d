@@ -124,3 +124,49 @@ describe('付け札の連続/グループ拡張', () => {
     expect(canAttach(full, c('S', 9))).toBe(false); // 5枚目
   });
 });
+
+describe('ラップ境界（全周・円環またぎ成長・契約10項目16）', () => {
+  const seq = (ranks: number[]): Meld => ({
+    id: 1,
+    owner: 'p0',
+    kind: 'sequence',
+    cards: ranks.map((r) => c('S', r as never)),
+  });
+
+  it('12枚アークに欠落ランクを付けると13枚全周が成立する', () => {
+    // 3 だけ欠けた12ランク（4..K,A,2）。欠けている 3 を付けると全13ランクが揃う。
+    const twelve = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 1, 2];
+    const arc = seq(twelve);
+    expect(isConsecutiveRun(twelve)).toBe(true); // 1本の連続弧
+    expect(canAttach(arc, c('S', 3))).toBe(true); // 穴埋めで全周
+    const full = attachResult(arc, c('S', 3));
+    expect(full.cards.length).toBe(13);
+    expect(isValidSequence(full.cards)).toBe(true); // 同スート13枚全周は正当
+  });
+
+  it('lone7 シークェンスが円環をまたいで K→A→2 まで成長できる', () => {
+    let m: Meld = { id: 0, owner: 'p0', kind: 'lone7', cards: [c('S', 7)] };
+    m = attachResult(m, c('S', 8)); // 7,8（シークェンス確定）
+    expect(m.kind).toBe('sequence');
+    for (const r of [9, 10, 11, 12, 13]) {
+      expect(canAttach(m, c('S', r as never))).toBe(true);
+      m = attachResult(m, c('S', r as never));
+    }
+    // K の次は A（円環またぎ）→ さらに 2 まで連続で伸ばせる。
+    expect(canAttach(m, c('S', 1))).toBe(true); // ...→K→A
+    m = attachResult(m, c('S', 1));
+    expect(canAttach(m, c('S', 2))).toBe(true); // A→2（ラップ）
+    m = attachResult(m, c('S', 2));
+    expect(m.cards.map((x) => x.rank)).toContain(1);
+    expect(m.cards.map((x) => x.rank)).toContain(2);
+    expect(isValidSequence(m.cards)).toBe(true);
+  });
+
+  it('同スート13枚全周は正当（isConsecutiveRun / isValidSequence とも真）', () => {
+    const all = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+    expect(isConsecutiveRun(all)).toBe(true);
+    expect(isValidSequence(all.map((r) => c('S', r as never)))).toBe(true);
+    // 14枚目（既存ランクの再登場）は重複となり不可。
+    expect(isConsecutiveRun([...all, 1])).toBe(false);
+  });
+});

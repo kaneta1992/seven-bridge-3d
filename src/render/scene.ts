@@ -91,6 +91,10 @@ export class TableScene {
   private onCamPointerMove!: (e: PointerEvent) => void;
   private onCamPointerUp!: (e: PointerEvent) => void;
   private onCamWheel!: (e: WheelEvent) => void;
+  // WebGL コンテキストロスト対応（項目11）: ロスト検知でループを止め復帰案内を出す。
+  private onContextLost!: (e: Event) => void;
+  private onContextRestored!: (e: Event) => void;
+  private lostNoticeEl: HTMLElement | null = null;
 
   private seatCount = 4;
   private raf = 0;
@@ -127,6 +131,9 @@ export class TableScene {
     hot: boolean;
   }[] = [];
   private viewYou = 0; // 現手番（=自席）インデックス。場リングの配置に使う。
+  // ドラッグ中カードが付け札可能なメルドID集合（項目15b: dropTargetAt のメルド判定をこれに限定）。
+  private attachableMelds = new Set<number>();
+  private handDragging = false; // 手札 D&D 中はカメラ操作を無視する（項目10）。
 
   // 席名ビルボードラベル（契約05項目2）: Canvas テクスチャの Sprite（常にカメラ正対）。
   private labels = new Map<
@@ -154,6 +161,7 @@ export class TableScene {
     this.renderer.domElement.style.display = 'block';
     setMaxAnisotropy(this.renderer.capabilities.getMaxAnisotropy());
     this.attachCameraControls();
+    this.attachContextLossHandlers();
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0a1018');
@@ -654,10 +662,21 @@ export class TableScene {
     this.meldRingGeo = new THREE.RingGeometry(0.34, 0.46, 40); // 付け札光枠（メルドごとに材質を持つ）
   }
 
+  /** 手札 D&D の開始/終了を通知する。ドラッグ中はキャンバスのカメラ操作を無視する（項目10）。 */
+  setHandDragging(active: boolean): void {
+    this.handDragging = active;
+    if (active) {
+      // ドラッグ開始で進行中のオービット/ピンチ入力状態をクリアし、遷移ジャンプを防ぐ。
+      this.pointers.clear();
+      this.pinchDist = 0;
+    }
+  }
+
   /** ドラッグ開始時に全ドロップ先を同時に光らせる（E5: どこに落とすか一目で分かる）。 */
   showDropTargets(attachMeldIds: number[]): void {
     this.clearMeldRings();
     this.dropRings = [];
+    this.attachableMelds = new Set(attachMeldIds); // dropTargetAt のメルド判定を付け札可能なものに限定（項目15b）
     this.discardRing.visible = true;
     this.dropRings.push({ mesh: this.discardRing, kind: 'discard', hot: false });
     // 場（公開）リングは現手番席のメルドゾーンへ置く（公開カードが出る場所と一致）。
@@ -709,6 +728,7 @@ export class TableScene {
     (this.fieldRing.material as THREE.MeshBasicMaterial).opacity = 0;
     this.clearMeldRings();
     this.dropRings = [];
+    this.attachableMelds.clear();
     this.wake();
   }
 
@@ -750,7 +770,9 @@ export class TableScene {
         let o: THREE.Object3D | null = hit.object;
         while (o && o.userData?.meldId == null) o = o.parent;
         const mid = o?.userData?.meldId;
-        if (typeof mid === 'number') return { kind: 'meld', meldId: mid };
+        // 付け札できるメルドのヒットだけを標的にする。不可メルドは素通しして下の捨て札/場の判定へ
+        // 落とす（誤付け札・誤トーストの解消・項目15b）。ドラッグ外（集合空）では従来どおり素通し。
+        if (typeof mid === 'number' && this.attachableMelds.has(mid)) return { kind: 'meld', meldId: mid };
       }
     }
     // 2) 卓天板との交点から 捨て札 / 場 を判定（カメラ・リサイズに自動追従＝E3）
@@ -1019,8 +1041,13 @@ export class TableScene {
     this.camPosGoal.y = height;
     this.camTargetGoal.copy(dir).multiplyScalar(fwd);
     this.camTargetGoal.y = 0;
-    this.camera.fov = portrait ? 58 : 46;
+    this.camera.fov = this.orientationFov();
     this.camera.updateProjectionMatrix();
+  }
+
+  /** 画面の縦横に応じた画角（縦画面は視野が狭いので広角側）。aimCameraAt と resize で共有する（項目14）。 */
+  private orientationFov(): number {
+    return this.aspect() < 1 ? 58 : 46;
   }
 
   // ---- ユーザーカメラ操作（契約07項目1: ピンチズーム / スワイプ軌道回転） --------
@@ -1043,12 +1070,16 @@ export class TableScene {
     };
 
     this.onCamPointerDown = (e: PointerEvent): void => {
+      // 手札を卓へドラッグ中はカメラ操作を無視する（別 pointerId のタッチでオービット/ピンチが
+      // 誤発火して視点が飛ぶのを防ぐ・項目10）。手札 D&D は handEl 側がポインタを扱う。
+      if (this.handDragging) return;
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.pointers.size === 2) this.pinchDist = this.currentPinchDist();
       el.setPointerCapture?.(e.pointerId);
       e.preventDefault();
     };
     this.onCamPointerMove = (e: PointerEvent): void => {
+      if (this.handDragging) return;
       const prev = this.pointers.get(e.pointerId);
       if (!prev) return;
       const nx = e.clientX;
@@ -1119,6 +1150,59 @@ export class TableScene {
       const cy = rect.top + ((1 - p.y) / 2) * rect.height;
       return { client: [Math.round(cx), Math.round(cy)], target: this.dropTargetAt(cx, cy) };
     };
+  }
+
+  // ---- WebGL コンテキストロスト対応（項目11） --------------------------------
+  // GPU ドライバのリセットやタブ資源回収でコンテキストが失われると、以後の描画は黒画面のまま
+  // 放置される。lost は preventDefault で「復帰し得る」状態にし、日本語の再読み込み案内を出す。
+  // restored ではループを再開し、案内を消す（テクスチャ等の再アップロードは three が担う）。
+  private attachContextLossHandlers(): void {
+    const el = this.renderer.domElement as HTMLCanvasElement;
+    this.onContextLost = (e: Event): void => {
+      e.preventDefault(); // 既定の「復帰しない」挙動を止め、restored を受け取れるようにする
+      this.running = false;
+      cancelAnimationFrame(this.raf);
+      this.showLostNotice();
+    };
+    this.onContextRestored = (): void => {
+      this.hideLostNotice();
+      if (!this.running) {
+        this.running = true;
+        this.raf = requestAnimationFrame(this.loop);
+      }
+      this.wake();
+    };
+    el.addEventListener('webglcontextlost', this.onContextLost as EventListener);
+    el.addEventListener('webglcontextrestored', this.onContextRestored as EventListener);
+  }
+
+  private showLostNotice(): void {
+    if (this.lostNoticeEl) return;
+    const box = document.createElement('div');
+    box.className = 'gl-lost-notice';
+    box.setAttribute('role', 'alert');
+    box.style.cssText =
+      'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;' +
+      'justify-content:center;gap:12px;text-align:center;padding:24px;z-index:50;' +
+      'background:rgba(6,10,16,0.86);color:#e8eef5;font-size:15px;line-height:1.6;';
+    const msg = document.createElement('p');
+    msg.textContent = '3D描画が中断しました（グラフィックが一時的に失われました）。復帰しない場合はページを再読み込みしてください。';
+    msg.style.maxWidth = '28em';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '再読み込み';
+    btn.style.cssText = 'padding:8px 18px;border-radius:8px;border:0;background:#2f8f6b;color:#fff;font-size:15px;cursor:pointer;';
+    btn.onclick = (): void => globalThis.location?.reload();
+    box.append(msg, btn);
+    // container は relative 前提（renderer canvas を内包）。overlay として絶対配置する。
+    if (getComputedStyle(this.container).position === 'static') this.container.style.position = 'relative';
+    this.container.appendChild(box);
+    this.lostNoticeEl = box;
+  }
+
+  private hideLostNotice(): void {
+    this.lostNoticeEl?.remove();
+    this.lostNoticeEl = null;
   }
 
   private currentPinchDist(): number {
@@ -1301,6 +1385,9 @@ export class TableScene {
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h);
     this.camera.aspect = this.aspect();
+    // 縦横切替（回転）に追従して画角を更新する。userControlled 中でも適用し、縦画面で卓が
+    // 見切れる/横画面で寄りすぎるのを防ぐ（項目14）。オービットの位置・注視点は保持する。
+    this.camera.fov = this.orientationFov();
     this.camera.updateProjectionMatrix();
     this.postfx?.setSize(w, h, this.renderer.getPixelRatio());
     this.particles.setScale(this.particleScale());
@@ -1331,6 +1418,9 @@ export class TableScene {
     cel.removeEventListener('pointerup', this.onCamPointerUp);
     cel.removeEventListener('pointercancel', this.onCamPointerUp);
     cel.removeEventListener('wheel', this.onCamWheel);
+    cel.removeEventListener('webglcontextlost', this.onContextLost as EventListener);
+    cel.removeEventListener('webglcontextrestored', this.onContextRestored as EventListener);
+    this.hideLostNotice();
     delete (cel as unknown as { __cameraState?: () => unknown }).__cameraState;
 
     // 演出資源（コンテキストロスト対策・E11）: 光輪 → パーティクル → コンポーザ → 環境マップ

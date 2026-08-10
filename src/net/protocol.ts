@@ -73,12 +73,42 @@ function randomKey(): string {
   return Array.from(buf, (n) => n.toString(36)).join('');
 }
 
+/**
+ * 席乗っ取り対策の秘匿再束縛トークン（契約10項目1）。playerKey と対で「この席は自分のもの」を
+ * 証明する。pk は Roster 等の公開メッセージに載るため盗用され得るが、token は Hello にしか載らない
+ * ため、盗んだ pk だけでは別ブラウザから席を再束縛できない。localStorage `sb_tok_<code>` に保存し、
+ * 同一ブラウザの再接続でのみ同値を再現する。保存不可環境では都度生成（再束縛の防御のみ弱くなる）。
+ */
+export function loadOrCreateRebindToken(code: string): string {
+  const storageKey = `sb_tok_${code}`;
+  try {
+    const existing = globalThis.localStorage?.getItem(storageKey);
+    if (existing) return existing;
+  } catch {
+    /* localStorage 不可なら都度生成 */
+  }
+  const token = randomKey() + randomKey();
+  try {
+    globalThis.localStorage?.setItem(storageKey, token);
+  } catch {
+    /* 保存不可でもゲームは成立する */
+  }
+  return token;
+}
+
 // ---- メッセージ型（ホスト権威） -----------------------------------------
 
-/** ゲスト→ホスト: 参加/再接続時の自己申告（席鍵と表示名）。 */
+/**
+ * ゲスト→ホスト: 参加/再接続時の自己申告（席鍵・表示名・秘匿再束縛トークン）。
+ * token は席乗っ取り対策の秘匿値（クライアント生成・localStorage 保存・ワイヤ上は
+ * この Hello にのみ載る）。ホストは pk 初回束縛時に token を記録し、既知 pk の別 peer への
+ * 再束縛は token 一致時のみ許可する（契約10項目1）。Roster/Start/Snapshot 等の公開
+ * メッセージには絶対に載せない。
+ */
 export interface HelloMsg {
   pk: string;
   name: string;
+  token: string;
 }
 
 export interface RosterMember {
@@ -164,6 +194,23 @@ export function sanitizeRoomAd(raw: unknown): RoomAd | null {
   const count = typeof r.count === 'number' && Number.isFinite(r.count) ? Math.max(0, Math.min(SEAT_CAP, Math.round(r.count))) : 0;
   const rounds = typeof r.rounds === 'number' && Number.isFinite(r.rounds) ? Math.max(1, Math.min(99, Math.round(r.rounds))) : 1;
   return { code, hostName, count, rounds };
+}
+
+/**
+ * 受信 Hello を検証・整形する（外部由来ペイロードの防御・契約10項目3）。sanitizeRoomAd と対称。
+ * - pk: 英数と - _ のみ・1〜64文字の string（席鍵の書式）。不正は破棄（null）。
+ * - token: 非空・128文字以内の string（秘匿再束縛トークン）。欠落/不正は破棄。
+ * - name: string を制御文字除去のうえ10文字に slice（非 string は空名）。
+ * ここを通ったものだけが束縛・名簿更新の対象になる。
+ */
+export function sanitizeHello(raw: unknown): HelloMsg | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.pk !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.pk)) return null;
+  if (typeof r.token !== 'string' || r.token.length === 0 || r.token.length > 128) return null;
+  // eslint-disable-next-line no-control-regex
+  const name = typeof r.name === 'string' ? r.name.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 10) : '';
+  return { pk: r.pk, name, token: r.token };
 }
 
 /** Trystero makeAction の名前空間（12バイト以内）。 */

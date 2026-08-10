@@ -161,13 +161,20 @@ function publicList(body: HTMLElement, cb: LobbyCallbacks, state: LobbyState): (
   // 診断行（2026-08-11）: ビルドIDとリレー接続数。遠隔サポート時に
   // 「古いキャッシュか」「ネットワークがリレーをブロックしているか」を一目で切り分ける。
   const diag = el('p', { class: 'hint diag', text: '' });
+  let diagTimer = 0;
   const paintDiag = (): void => {
+    // 診断行が DOM から外れていたら自己解放する（cleanup を呼ばない画面遷移でのリーク防止・項目12）。
+    if (diagTimer && !diag.isConnected) {
+      window.clearInterval(diagTimer);
+      diagTimer = 0;
+      return;
+    }
     const rs = relayStatus();
     const warn = rs.connected === 0 ? ' ⚠ リレーに接続できていません（ネットワーク制限の可能性）' : '';
     diag.textContent = `接続リレー ${rs.connected}/${rs.total} ・ build ${__BUILD_ID__}${warn}`;
   };
   paintDiag();
-  const diagTimer = window.setInterval(paintDiag, 2000);
+  diagTimer = window.setInterval(paintDiag, 2000);
 
   const wrap = el('div', {}, [
     field('あなたの名前', nameInput),

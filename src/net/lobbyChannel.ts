@@ -9,6 +9,7 @@ import { LOBBY_NS, sanitizeRoomAd, type RoomAd, type Transport } from './protoco
 const AD_INTERVAL_MS = 3000; // 広告送信間隔（数秒間隔・契約）
 const AD_TTL_MS = 8000; // 受信広告の失効時間（この間 未更新なら一覧から消す＝開始/解散/満員で自然消滅）
 const SWEEP_MS = 1500; // TTL 掃引間隔
+const MAX_ADS = 50; // 保持する広告の全体上限（送信 peer 単位・溢れさせ攻撃の防御・契約10項目4）
 
 interface LobbyOpts {
   now?: () => number;
@@ -19,6 +20,7 @@ export class LobbyLink {
   private readonly transport: Transport;
   private readonly send: (ad: RoomAd) => void;
   private readonly now: () => number;
+  // 送信 peer ごとに最新1件だけ保持する（1 peer が多数コードで一覧を溢れさせるのを防ぐ・項目4）。
   private readonly ads = new Map<string, { ad: RoomAd; at: number }>();
   private listeners = new Set<(rooms: RoomAd[]) => void>();
   private adTimer = 0;
@@ -31,7 +33,7 @@ export class LobbyLink {
     this.now = opts.now ?? (() => Date.now());
     const [send, recv] = transport.makeAction<RoomAd>(LOBBY_NS);
     this.send = send;
-    recv((raw) => this.onAd(raw));
+    recv((raw, peer) => this.onAd(raw, peer));
     // 閲覧者がロビーへ入った瞬間に広告を即送する（定期間隔の待ちやモバイルのタイマー
     // 抑制に依存しない・2026-08-11）。広告していない側では postAd が no-op。
     transport.onPeerJoin(() => this.postAd());
@@ -77,11 +79,17 @@ export class LobbyLink {
     return () => this.listeners.delete(cb);
   }
 
-  /** 失効していない公開ルーム一覧（ホスト名順で安定表示）。 */
+  /** 失効していない公開ルーム一覧（コード単位で重複排除し最新を採用・ホスト名順で安定表示）。 */
   getRooms(): RoomAd[] {
     const t = this.now();
-    return [...this.ads.values()]
-      .filter((v) => t - v.at <= AD_TTL_MS)
+    // ads は peer 単位。同一コードを複数 peer が広告し得るので、コードごとに最新の到着を1件へ畳む。
+    const byCode = new Map<string, { ad: RoomAd; at: number }>();
+    for (const v of this.ads.values()) {
+      if (t - v.at > AD_TTL_MS) continue;
+      const cur = byCode.get(v.ad.code);
+      if (!cur || v.at > cur.at) byCode.set(v.ad.code, v);
+    }
+    return [...byCode.values()]
       .map((v) => v.ad)
       .sort((a, b) => a.hostName.localeCompare(b.hostName) || a.code.localeCompare(b.code));
   }
@@ -99,10 +107,12 @@ export class LobbyLink {
 
   // ---- 内部 -------------------------------------------------------------
 
-  private onAd(raw: unknown): void {
+  private onAd(raw: unknown, peer: string): void {
     const ad = sanitizeRoomAd(raw); // 4項目のみへ整形＋妥当性検証（不正/汚染は破棄・E5-lobby）
     if (!ad) return;
-    this.ads.set(ad.code, { ad, at: this.now() });
+    // 送信 peer ごとに最新1件へ上書き。新規 peer で全体上限を超える分は破棄（項目4）。
+    if (!this.ads.has(peer) && this.ads.size >= MAX_ADS) return;
+    this.ads.set(peer, { ad, at: this.now() });
     this.emit();
   }
 

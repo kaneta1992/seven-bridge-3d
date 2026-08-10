@@ -122,7 +122,8 @@ export function canAttach(meld: Meld, card: Card): boolean {
 
 /** 付け札を適用した新しいメルドを返す（canAttach が真である前提）。元メルドは不変。 */
 export function attachResult(meld: Meld, card: Card): Meld {
-  const cards = [...meld.cards, card];
+  // 付けるカードは防御コピーする（呼び出し側の参照を新メルドへ共有しない・publishMeld/鳴きと整合・項目8）。
+  const cards = [...meld.cards, { ...card }];
   let kind: MeldKind = meld.kind;
   let determined = meld.determined;
 

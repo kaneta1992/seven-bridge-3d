@@ -8,6 +8,7 @@ import { canAttach, cardId } from '../core';
 import { LocalDriver } from '../driver/localDriver';
 import type { ClaimOption, GameDriver } from '../driver/types';
 import {
+  CLAIM_WINDOW_MS,
   generateRoomCode,
   isValidRoomCode,
   loadOrCreatePlayerKey,
@@ -36,7 +37,7 @@ const RANK_LABEL: Record<number, string> = {
 };
 const isRed = (c: Card): boolean => c.suit === 'D' || c.suit === 'H';
 const rankText = (c: Card): string => RANK_LABEL[c.rank] ?? String(c.rank);
-const CLAIM_WINDOW_MS = 10000;
+// 鳴きウィンドウ長は protocol.ts（ホスト権威の基準・現在10秒）を単一ソースとして import する（項目13）。
 
 interface WaitInfo {
   code: string;
@@ -236,6 +237,7 @@ export class GameUI {
     this.celebratedRound = -1;
     this.celebratedGameOver = false;
     this.stopClaimTimer();
+    this.closing = false; // 鳴きウィンドウ確定中の破棄で closing が残り、次局の閉窓が永久閉塞するのを防ぐ（項目9）
     this.clearDrawTimers();
     this.selected.clear();
     this.handOrder = [];
@@ -373,9 +375,20 @@ export class GameUI {
       maxPlayers: info.maxPlayers,
       totalRounds: info.totalRounds,
       canStart: info.amHost && info.members.length >= 2,
-      onStart: () => this.session?.startGame(),
+      onStart: () => this.startHostGame(),
       onLeave: () => this.showLobby(),
     });
+  }
+
+  // ホスト: 開始ボタン。ボタン活性だけに頼らず人数を再確認し、2人未満はトーストで拒否する（項目5）。
+  private startHostGame(): void {
+    const info = this.waitInfo;
+    if (!info || !this.session) return;
+    if (info.members.length < 2) {
+      this.toast('2人以上そろってから開始できます');
+      return;
+    }
+    this.session.startGame();
   }
 
   // ---- ゲーム開始（共通） ------------------------------------------------
@@ -844,6 +857,7 @@ export class GameUI {
           d.active = true;
           this.dragging = true;
           this.cardEls.get(d.id)?.classList.add('dragging');
+          this.scene?.setHandDragging(true); // 卓ドラッグ中はカメラ操作を止める（項目10）
           this.beginDragVisuals();
         }
         e.preventDefault();
@@ -859,6 +873,7 @@ export class GameUI {
       if (hand.hasPointerCapture(d.pointerId)) hand.releasePointerCapture(d.pointerId);
       const { id, active } = d;
       this.drag = null;
+      this.scene?.setHandDragging(false); // 卓ドラッグ終了でカメラ操作を再開（項目10）
       const cardEl = this.cardEls.get(id);
       cardEl?.classList.remove('dragging');
       if (!active) {
@@ -958,10 +973,13 @@ export class GameUI {
   }
 
   // 付け札できるメルドID（自メルド公開済み & canAttach）。ドラッグ中の 3D 光枠に使う。
+  // 複数選択ドラッグ（card=null＝メルド公開の導線）では付け札対象は存在しないため空配列を返す
+  // （以前は全メルドを光らせて誤表示していた・項目15a）。
   private attachableMeldIds(view: PlayerView, card: Card | null): number[] {
+    if (!card) return [];
     const me = this.driver!.currentPlayerId();
     if (!view.melds.some((m) => m.owner === me)) return [];
-    return view.melds.filter((m) => (card ? canAttach(m, card) : true)).map((m) => m.id);
+    return view.melds.filter((m) => canAttach(m, card)).map((m) => m.id);
   }
 
   private moveDrag(id: string, x: number, y: number): void {
@@ -1014,6 +1032,9 @@ export class GameUI {
     if (pr.width === 0) return null;
     const M = 14; // 取りこぼし対策の許容マージン
     if (x < pr.left - M || x > pr.right + M || y < pr.top - M || y > pr.bottom + M) return null;
+    // ポインタ直下のメルドを優先し、直下に無ければ付け札可能メルドのうち最近傍へ吸着する（項目15c）。
+    // 直下優先により、複数メルドが近接していても意図したメルドを外さない。
+    let under: Meld | null = null;
     let best: Meld | null = null;
     let bestD = Infinity;
     for (const node of Array.from(this.overlay.querySelectorAll('.meld'))) {
@@ -1023,13 +1044,15 @@ export class GameUI {
       if (r.width === 0) continue;
       const meld = v.melds.find((m) => String(m.id) === mid);
       if (!meld || !canAttach(meld, card)) continue; // 付けられないメルドは対象外
+      const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      if (inside) under = meld; // 直下ヒット（重なりは後勝ち＝手前に描かれたチップ）
       const d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
       if (d < bestD) {
         bestD = d;
         best = meld;
       }
     }
-    return best;
+    return under ?? best;
   }
 
   // ドロップ確定: 2Dメルドチップ > 3D標的（メルド > 捨て札 > 場）。卓外/手札帯は false（並び替え扱い・E6）。

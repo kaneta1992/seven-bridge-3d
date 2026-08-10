@@ -456,5 +456,10 @@ export function applyAction(prev: GameState, action: Action): ActionResult {
       beginTurn(state, (state.claimWindow.discarder + 1) % n);
       return { ok: true, state };
     }
+
+    default:
+      // 未知の action.type（型を迂回した不正入力・将来の取りこぼし）は状態を変えず拒否する。
+      // undefined を返さないことで呼び出し側（ホスト権威検証・UI）が常に ActionResult を得る。
+      return fail('unknown action');
   }
 }

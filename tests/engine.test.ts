@@ -16,6 +16,18 @@ function ok(state: GameState, action: Parameters<typeof applyAction>[1]): GameSt
   return r.state;
 }
 
+describe('applyAction 未知アクションの防御（契約10項目7）', () => {
+  it('未知の action.type は状態を変えず fail("unknown action") を返す（undefined を返さない）', () => {
+    const g = createGame({ players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], seed: 3 });
+    // 型を迂回した不正入力（将来の取りこぼしを含む）。
+    const r = applyAction(g, { type: 'bogus' } as unknown as Parameters<typeof applyAction>[1]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('unknown action');
+    // 元状態は不変（構造クローンのため参照も別だが、フェーズ等が変わっていないことを確認）。
+    expect(g.phase).toBe('awaitingStart');
+  });
+});
+
 describe('配札とディーラー移動 (E1: 2人/6人境界・最初のツモは左隣)', () => {
   it('startRound で7枚ずつ配り、山札と捨て札を作る', () => {
     const g = createGame({ players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], seed: 7 });

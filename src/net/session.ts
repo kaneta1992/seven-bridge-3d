@@ -7,7 +7,9 @@ import { HostDriver } from './hostDriver';
 import { GuestDriver } from './guestDriver';
 import {
   JOIN_TIMEOUT_MS,
+  loadOrCreateRebindToken,
   NS,
+  sanitizeHello,
   type AckMsg,
   type ActionMsg,
   type ErrMsg,
@@ -40,6 +42,8 @@ export class NetSession {
   readonly role: 'host' | 'guest';
   readonly code: string;
   private readonly selfPk: string;
+  /** 秘匿再束縛トークン（席乗っ取り対策・契約10項目1）。Hello にのみ載せ、公開メッセージには載せない。 */
+  private readonly selfToken: string;
   private readonly name: string;
   private transport: Transport;
   /** 復帰時の再join用トランスポート生成器（本番のみ注入。テストは省略＝再announceのみ）。 */
@@ -62,6 +66,8 @@ export class NetSession {
   private roster: RosterMember[] = [];
   private peerToPk = new Map<string, string>();
   private pkToPeer = new Map<string, string>();
+  /** pk → 初回束縛時に記録した秘匿トークン。既知 pk の再束縛はこの値と一致する Hello のみ許可（項目1）。 */
+  private pkToToken = new Map<string, string>();
   private started = false;
   private hostDriver: HostDriver | null = null;
 
@@ -76,6 +82,7 @@ export class NetSession {
     role: 'host' | 'guest',
     code: string,
     selfPk: string,
+    selfToken: string,
     name: string,
     transport: Transport,
     reconnect: (() => Transport) | null,
@@ -83,6 +90,7 @@ export class NetSession {
     this.role = role;
     this.code = code;
     this.selfPk = selfPk;
+    this.selfToken = selfToken;
     this.name = name;
     this.transport = transport;
     this.reconnect = reconnect;
@@ -96,10 +104,13 @@ export class NetSession {
     transport: Transport,
     opts: HostOpts,
     reconnect: (() => Transport) | null = null,
+    selfToken: string = loadOrCreateRebindToken(code),
   ): NetSession {
-    const s = new NetSession('host', code, selfPk, name, transport, reconnect);
+    const s = new NetSession('host', code, selfPk, selfToken, name, transport, reconnect);
     s.hostOpts = opts;
     s.roster = [{ pk: selfPk, name }];
+    // ホスト自身の pk は自トークンで初回束縛済みとみなす（自席は誰にも再束縛させない）。
+    s.pkToToken.set(selfPk, selfToken);
     return s;
   }
 
@@ -109,11 +120,12 @@ export class NetSession {
     name: string,
     transport: Transport,
     reconnect: (() => Transport) | null = null,
+    selfToken: string = loadOrCreateRebindToken(code),
   ): NetSession {
-    const s = new NetSession('guest', code, selfPk, name, transport, reconnect);
+    const s = new NetSession('guest', code, selfPk, selfToken, name, transport, reconnect);
     s.armJoinTimeout();
     // ホストがいつ接続しても identity を拾えるよう、参加時と各ピア接続時に hello を送る。
-    s.sendHello({ pk: selfPk, name });
+    s.sendHello({ pk: selfPk, name, token: selfToken });
     return s;
   }
 
@@ -125,6 +137,9 @@ export class NetSession {
   startGame(): HostDriver {
     if (this.role !== 'host' || !this.hostOpts) throw new Error('startGame: host only');
     if (this.hostDriver) return this.hostDriver;
+    // 人数ガード（項目5）: 2人未満での開始を拒否する。UI の活性制御だけに依存しない防御。
+    // 呼び出し側（app.ts）は開始前にトーストで理由を提示するため、ここに到達するのは誤用のみ。
+    if (this.roster.length < 2) throw new Error('startGame: need at least 2 players');
     const players = this.roster.map((m) => ({ id: m.pk, name: m.name }));
     this.started = true;
     this.hostDriver = new HostDriver({
@@ -171,7 +186,7 @@ export class NetSession {
   /** 名簿/identity を再送し、ホストは最新スナップショットを再配信する。 */
   private reannounce(): void {
     if (this.role === 'guest') {
-      this.sendHello({ pk: this.selfPk, name: this.name });
+      this.sendHello({ pk: this.selfPk, name: this.name, token: this.selfToken });
     } else {
       this.broadcastRoster();
       if (this.started) this.hostDriver?.resendAll();
@@ -216,11 +231,11 @@ export class NetSession {
     } else {
       rRoster((m, peer) => this.onRoster(m, peer));
       rStart((m, peer) => this.onStart(m, peer));
-      rSnap((m) => this.onSnap(m));
-      rErr((m) => this.guestDriver?.applyError(m.reqId, m.message));
-      rAck((m) => this.guestDriver?.applyAck(m.reqId));
-      rReject((m) => this.onReject(m));
-      this.transport.onPeerJoin(() => this.sendHello({ pk: this.selfPk, name: this.name }));
+      rSnap((m, peer) => this.onSnap(m, peer));
+      rErr((m, peer) => this.onErr(m, peer));
+      rAck((m, peer) => this.onAck(m, peer));
+      rReject((m, peer) => this.onReject(m, peer));
+      this.transport.onPeerJoin(() => this.sendHello({ pk: this.selfPk, name: this.name, token: this.selfToken }));
       this.transport.onPeerLeave((peer) => this.onGuestPeerLeave(peer));
     }
   }
@@ -232,8 +247,23 @@ export class NetSession {
     this.broadcastRoster();
   }
 
-  private onHello(m: HelloMsg, peer: string): void {
-    // peerId↔playerKey を最新束縛に更新（残存/二重接続は最新へ張り替え・E8）。
+  private onHello(raw: HelloMsg, peer: string): void {
+    // 入力検証（項目3）: 書式不正・トークン欠落の Hello は黙殺。
+    const m = sanitizeHello(raw);
+    if (!m) return;
+
+    // 秘匿トークン照合（席乗っ取り対策・項目1）:
+    //   - 未束縛の pk: 初回束縛としてトークンを記録する。
+    //   - 既知の pk: 記録済みトークンと一致する Hello のみ再束縛を許可し、不一致は黙殺する
+    //     （公開される pk を盗んでも、Hello にしか載らないトークンが無ければ席を奪えない）。
+    const knownToken = this.pkToToken.get(m.pk);
+    if (knownToken === undefined) {
+      this.pkToToken.set(m.pk, m.token);
+    } else if (knownToken !== m.token) {
+      return; // なりすまし: 束縛・名簿・スナップショットのいずれも変更しない
+    }
+
+    // peerId↔playerKey を最新束縛に更新（残存/二重接続は最新へ張り替え・E8）。トークン照合を通過済み。
     const prevPeer = this.pkToPeer.get(m.pk);
     if (prevPeer && prevPeer !== peer) this.peerToPk.delete(prevPeer);
     this.peerToPk.set(peer, m.pk);
@@ -314,8 +344,27 @@ export class NetSession {
     }, JOIN_TIMEOUT_MS) as unknown as number;
   }
 
+  /**
+   * ホストの先着束縛（席乗っ取り対策・項目2）。最初に権威メッセージ（Roster/Start）を送ってきた
+   * peer を hostPeerId として固定し、以後は別 peer からの権威メッセージを無視する。
+   * 残余リスク: 正規ホストより先に偽ホストが最初の Roster/Start を届ける「先着レース」は、
+   * P2P の到着順に依存するため本方式では防げない（この段では修正しない・契約10）。
+   */
+  private latchHost(peer: string): boolean {
+    if (this.hostPeerId === null) {
+      this.hostPeerId = peer;
+      return true;
+    }
+    return peer === this.hostPeerId;
+  }
+
+  /** 固定済みホスト以外からの権威メッセージ（Snapshot/Err/Ack/Reject）を弾く。未固定なら受理（Roster/Start 前）。 */
+  private fromHost(peer: string): boolean {
+    return this.hostPeerId === null || peer === this.hostPeerId;
+  }
+
   private onRoster(m: RosterMsg, peer: string): void {
-    this.hostPeerId = peer;
+    if (!this.latchHost(peer)) return; // 別 peer を騙る Roster は無視
     if (this.joinTimer) clearTimeout(this.joinTimer);
     if (m.started) return; // 開始後の名簿は無視（対局はスナップショットで駆動）
     this.handlers.roster?.([...m.members], false, {
@@ -326,7 +375,7 @@ export class NetSession {
   }
 
   private onStart(m: StartMsg, peer: string): void {
-    this.hostPeerId = peer;
+    if (!this.latchHost(peer)) return; // 別 peer を騙る Start は無視
     if (this.joinTimer) clearTimeout(this.joinTimer);
     if (!this.guestDriver) {
       this.guestDriver = new GuestDriver({
@@ -335,19 +384,32 @@ export class NetSession {
         totalRounds: m.totalRounds,
         sendAct: (msg) => this.sendAct(msg, this.hostPeerId),
       });
-      // 開始メッセージより先に届いたスナップショットを反映。
+      // 開始メッセージより先に届いたスナップショットを反映（最新1件のみ保持済み）。
       for (const s of this.snapBuffer) this.guestDriver.applySnapshot(s);
       this.snapBuffer = [];
       this.handlers.started?.(this.guestDriver);
     }
   }
 
-  private onSnap(m: SnapshotMsg): void {
+  private onSnap(m: SnapshotMsg, peer: string): void {
+    if (!this.fromHost(peer)) return; // 固定済みホスト以外のスナップショットは無視（項目2）
     if (this.guestDriver) this.guestDriver.applySnapshot(m);
-    else this.snapBuffer.push(m); // start より先に来たら一時保持
+    // start より先に来たスナップショットは最新1件（seq 最大）のみ保持（項目6・古い到着で上書きしない）。
+    else if (this.snapBuffer.length === 0 || m.seq > this.snapBuffer[0]!.seq) this.snapBuffer = [m];
   }
 
-  private onReject(m: RejectMsg): void {
+  private onErr(m: ErrMsg, peer: string): void {
+    if (!this.fromHost(peer)) return;
+    this.guestDriver?.applyError(m.reqId, m.message);
+  }
+
+  private onAck(m: AckMsg, peer: string): void {
+    if (!this.fromHost(peer)) return;
+    this.guestDriver?.applyAck(m.reqId);
+  }
+
+  private onReject(m: RejectMsg, peer: string): void {
+    if (!this.fromHost(peer)) return;
     if (this.joinTimer) clearTimeout(this.joinTimer);
     this.handlers.error?.(m.reason);
   }

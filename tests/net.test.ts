@@ -9,7 +9,18 @@ import type { GameDriver } from '../src/driver/types';
 import { GuestDriver } from '../src/net/guestDriver';
 import { HostDriver } from '../src/net/hostDriver';
 import { LobbyLink } from '../src/net/lobbyChannel';
-import { NS, sanitizeRoomAd, type RoomAd, type SnapshotMsg, type StartMsg } from '../src/net/protocol';
+import {
+  NS,
+  sanitizeHello,
+  sanitizeRoomAd,
+  type HelloMsg,
+  type Receiver,
+  type RoomAd,
+  type Sender,
+  type SnapshotMsg,
+  type StartMsg,
+  type Transport,
+} from '../src/net/protocol';
 import { NetSession } from '../src/net/session';
 import { MockHub, MockNode, settle } from './netHelpers';
 
@@ -259,7 +270,8 @@ describe('NetSession 統合（インメモリ・トランスポート）', () =>
     const hostT = hub.create('hostPeer');
     const g1T = hub.create('g1Peer');
     const hostS = NetSession.host('ABC237', 'h', 'H', hostT, { maxPlayers: 4, totalRounds: 1 });
-    const g1S = NetSession.guest('ABC237', 'g1', 'G1', g1T);
+    // 再束縛トークンを明示注入（同一ブラウザの再接続を模す。localStorage 非依存で決定的にする・項目1）。
+    const g1S = NetSession.guest('ABC237', 'g1', 'G1', g1T, null, 'tokG1');
     let g1Driver: GameDriver | null = null;
     g1S.on('started', (d) => (g1Driver = d));
 
@@ -270,21 +282,67 @@ describe('NetSession 統合（インメモリ・トランスポート）', () =>
     await settle();
     expect(g1Driver).not.toBeNull();
 
-    // g1 が別 peerId で再入室（localStorage の playerKey は同じ 'g1'）
+    // g1 が別 peerId で再入室（playerKey も再束縛トークンも同じ 'g1'/'tokG1'）
     const g1b = hub.create('g1bPeer');
     const [, onStart2] = g1b.makeAction<StartMsg>(NS.start);
     const [, onSnap2] = g1b.makeAction<SnapshotMsg>(NS.snap);
-    const [sHello2] = g1b.makeAction<{ pk: string; name: string }>(NS.hello);
+    const [sHello2] = g1b.makeAction<HelloMsg>(NS.hello);
     let gotStart = false;
     let snap2: SnapshotMsg | null = null;
     onStart2(() => (gotStart = true));
     onSnap2((m) => (snap2 = m));
-    sHello2({ pk: 'g1', name: 'G1' });
+    sHello2({ pk: 'g1', name: 'G1', token: 'tokG1' });
     await settle();
 
     expect(gotStart).toBe(true); // 席確定のため start を再送
     expect(snap2).not.toBeNull();
     expect((snap2 as unknown as SnapshotMsg).view.hand.length).toBe(7); // 最新スナップショットで復帰
+
+    hostS.dispose();
+    g1S.dispose();
+  });
+
+  it('席乗っ取り拒否: 盗んだ pk でも再束縛トークンが不一致な Hello はホストに黙殺される（項目1）', async () => {
+    const hub = new MockHub();
+    const hostT = hub.create('hostPeer');
+    const g1T = hub.create('g1Peer');
+    const hostS = NetSession.host('ABC239', 'h', 'H', hostT, { maxPlayers: 4, totalRounds: 1 });
+    const g1S = NetSession.guest('ABC239', 'g1', 'G1', g1T, null, 'tokG1');
+    let g1Driver: GameDriver | null = null;
+    g1S.on('started', (d) => (g1Driver = d));
+
+    await settle();
+    const hostDriver = hostS.startGame();
+    await settle();
+    void hostDriver.dispatch({ type: 'startRound' });
+    await settle();
+    expect(g1Driver).not.toBeNull();
+
+    // 攻撃者が g1 の公開 pk を盗み、別 peer から誤ったトークンで席の再束縛を試みる。
+    const evil = hub.create('evilPeer');
+    const [, onEvilStart] = evil.makeAction<StartMsg>(NS.start);
+    const [, onEvilSnap] = evil.makeAction<SnapshotMsg>(NS.snap);
+    const [sEvilHello] = evil.makeAction<HelloMsg>(NS.hello);
+    let evilStart = false;
+    let evilSnap: SnapshotMsg | null = null;
+    onEvilStart(() => (evilStart = true));
+    onEvilSnap((m) => (evilSnap = m));
+    sEvilHello({ pk: 'g1', name: 'EVIL', token: 'WRONG' });
+    await settle();
+
+    // トークン不一致 → 束縛・start 再送・スナップショットのいずれも起きない（黙殺）。
+    expect(evilStart).toBe(false);
+    expect(evilSnap).toBeNull();
+
+    // 正規 g1 は同トークンでの再接続なら引き続き復帰できる（対照）。
+    const g1b = hub.create('g1bPeer');
+    const [, onStart2] = g1b.makeAction<StartMsg>(NS.start);
+    const [sHello2] = g1b.makeAction<HelloMsg>(NS.hello);
+    let gotStart = false;
+    onStart2(() => (gotStart = true));
+    sHello2({ pk: 'g1', name: 'G1', token: 'tokG1' });
+    await settle();
+    expect(gotStart).toBe(true);
 
     hostS.dispose();
     g1S.dispose();
@@ -366,5 +424,57 @@ describe('LobbyLink 公開ロビー（固定チャネル広告）', () => {
       rounds: 1,
     });
     expect(sanitizeRoomAd(null)).toBeNull();
+  });
+
+  it('受信広告は送信 peer ごとに最新1件・全体上限50件で管理する（溢れ防御・項目4）', () => {
+    // recv を捕捉できる最小トランスポートで、任意の送信 peer から onAd を直接駆動する。
+    let recvFn: ((raw: unknown, peer: string) => void) | null = null;
+    const transport: Transport = {
+      selfId: 'viewer',
+      makeAction: <T,>(_ns: string): [Sender<T>, Receiver<T>] => [
+        () => {},
+        (fn) => {
+          recvFn = fn as unknown as (raw: unknown, peer: string) => void;
+        },
+      ],
+      onPeerJoin: () => {},
+      onPeerLeave: () => {},
+      getPeers: () => [],
+      leave: () => {},
+    };
+    const view = new LobbyLink(transport);
+    const code = (i: number) => `ROOM${String(i).padStart(2, '0')}`; // 6桁の妥当コード
+    // 60 の異なる peer が各々別コードを広告 → 上限50件で頭打ち（超過10件は破棄）。
+    for (let i = 0; i < 60; i++) recvFn!({ code: code(i), hostName: 'H', count: 1, rounds: 1 }, `peer${i}`);
+    expect(view.getRooms().length).toBe(50);
+
+    // 同一 peer が別コードを広告 → 件数は増えず、その peer の最新1件へ置き換わる。
+    recvFn!({ code: code(0), hostName: 'H', count: 1, rounds: 1 }, 'peer0'); // peer0 の元コード
+    recvFn!({ code: 'ZZZ999', hostName: 'H', count: 1, rounds: 1 }, 'peer0'); // 最新へ差し替え
+    const rooms = view.getRooms();
+    expect(rooms.length).toBe(50); // 件数は不変（peer 単位）
+    expect(rooms.some((r) => r.code === 'ZZZ999')).toBe(true);
+    expect(rooms.some((r) => r.code === code(0))).toBe(false); // 古いコードは残らない
+    view.dispose();
+  });
+});
+
+describe('sanitizeHello 入力検証（契約10項目3）', () => {
+  it('正当な Hello は pk/name/token を通し、不正は破棄、name は10文字slice・制御文字除去', () => {
+    expect(sanitizeHello({ pk: 'g1_-A9', name: 'ゲスト', token: 'tok' })).toEqual({
+      pk: 'g1_-A9',
+      name: 'ゲスト',
+      token: 'tok',
+    });
+    expect(sanitizeHello({ pk: 'bad pk!', name: 'G', token: 't' })).toBeNull(); // 記号/空白は不可
+    expect(sanitizeHello({ pk: 'a'.repeat(65), name: 'G', token: 't' })).toBeNull(); // 64文字超
+    expect(sanitizeHello({ pk: 'g1', name: 'G' })).toBeNull(); // token 欠落
+    expect(sanitizeHello({ pk: 'g1', name: 'G', token: '' })).toBeNull(); // token 空
+    expect(sanitizeHello(null)).toBeNull();
+    expect(sanitizeHello({ pk: 'g1', name: 'x'.repeat(30), token: 't' })!.name.length).toBe(10);
+    expect(sanitizeHello({ pk: 'g1', name: 'ABC', token: 't' })!.name).toBe('ABC');
+    // 制御文字（NUL / 0x1f）は除去される。
+    const ctrl = 'A' + String.fromCharCode(0) + 'B' + String.fromCharCode(0x1f) + 'C';
+    expect(sanitizeHello({ pk: 'g1', name: ctrl, token: 't' })!.name).toBe('ABC');
   });
 });
