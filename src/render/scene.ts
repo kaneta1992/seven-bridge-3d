@@ -8,13 +8,13 @@ import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
 import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
 import { disposeFelt, feltTexture } from './felt';
+import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
 import { BLOOM_LAYER, createPostFX, type PostFX } from './postfx';
 import { detectQuality, type QualityTier } from './quality';
 
-const CARD_W = 0.72;
-const CARD_H = 1.0;
+// CARD_W / CARD_H は meldLayout と単一ソース化（配置の純粋関数と 3D で同じ寸法を使う・契約11）。
 const CARD_D = 0.02;
 const TABLE_TOP_Y = 0;
 const SEAT_R = 2.55; // 席の半径
@@ -50,6 +50,7 @@ interface CardObj {
   removing: boolean;
   removeAt: number;
   spawned: boolean;
+  targetScale: number; // 目標スケール（メルドは席の混み具合で段階縮小・契約11。非メルドは1）
   meldId?: number; // 面カードが 3D メルドに属する場合の所属メルドID（レイキャスト付け札用・R4項目5）
 }
 
@@ -444,8 +445,11 @@ export class TableScene {
     //    他家の裏向き手札（section 4）と山札（section 5）は 3D 継続。
     //    place() の spawn 元として deckPos を使うため、捨て札/メルドの初出カードは山札から出る演出になる。
 
-    // 2) メルド（面表示）: 所有者席前に整列。メルドが増えても重ならないよう
-    //    「1行の幅を超えたら中心側の段へ折り返す」パッキングで配置し、
+    // 2) メルド（面表示）: 所有者席の扇形セクタ内へ配置する（契約11 = 再設計）。
+    //    配置は純粋関数 layoutSeatMelds に委譲する（DOM/three 非依存で数値検証可能）:
+    //     - 最内行を中央保護ゾーンの床に置き、段は外周方向へ折り返す＝山札/捨て札へ絶対に侵入しない
+    //     - 各カードを席の角度セクタ内へ収める＝隣席のメルドと重ならない
+    //     - 収まらなければカードを段階縮小（scale）／長いメルドは行を跨いで折り返す
     //    全メルドカードへ単調増加の微小 y を与えて共面（Z-fighting）を防ぐ。
     const meldsBySeat = new Map<number, Meld[]>();
     for (const meld of view.melds) {
@@ -454,55 +458,32 @@ export class TableScene {
       arr.push(meld);
       meldsBySeat.set(seat, arr);
     }
-    const CARD_STEP = 0.34; // メルド内カード間隔（適度な重なり）
-    const MELD_GAP = 0.42; // メルド間の余白
-    const ROW_PITCH = 0.64; // 折り返し段の半径方向ピッチ
-    // 席数が多いほど隣席と干渉しないよう1行の幅を狭める
-    const rowBudget = this.seatCount >= 5 ? 1.9 : this.seatCount === 4 ? 2.5 : 3.1;
-    const widthOf = (m: Meld): number => Math.max(1, m.cards.length) * CARD_STEP;
     let ySeq = 0; // 全メルドカード通し番号（y 段差用）
     for (const [seat, melds] of meldsBySeat) {
       const dir = this.seatDir(seat);
       const tangent = new THREE.Vector3(-dir.z, 0, dir.x);
-      // メルドを行に貪欲パッキング
-      const rows: Meld[][] = [];
-      let row: Meld[] = [];
-      let rowW = 0;
-      for (const m of melds) {
-        const w = widthOf(m);
-        if (row.length && rowW + MELD_GAP + w > rowBudget) {
-          rows.push(row);
-          row = [];
-          rowW = 0;
-        }
-        rowW += (row.length ? MELD_GAP : 0) + w;
-        row.push(m);
-      }
-      if (row.length) rows.push(row);
-
-      rows.forEach((rowMelds, r) => {
-        const total =
-          rowMelds.reduce((s, m) => s + widthOf(m), 0) + MELD_GAP * (rowMelds.length - 1);
-        const radial = SEAT_R * 0.62 - r * ROW_PITCH;
-        let cursor = -total / 2; // 行左端の接線座標
-        for (const meld of rowMelds) {
-          const w = widthOf(meld);
-          // 表示順に整列（連番はランク順・組はスート順）。core のメルドは不変に保つ（E8）。
-          orderedMeldCards(meld).forEach((card, k) => {
-            const id = cardId(card);
-            desired.add(id);
-            const tan = cursor + (k + 0.5) * CARD_STEP;
-            const p = dir
-              .clone()
-              .multiplyScalar(radial)
-              .addScaledVector(tangent, tan)
-              .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.05 + ySeq * 0.006, 0));
-            ySeq++;
-            this.place(id, card, p, this.flatQuat(seat, 0, true), now, 0, deckPos, meld.id);
-          });
-          cursor += w + MELD_GAP;
-        }
+      const quat = this.flatQuat(seat, 0, true);
+      // 表示順に整列したカード列をメルドID→配列で引けるようにする（core のメルドは不変・E8）。
+      const orderedById = new Map<number, Card[]>();
+      const inputs: MeldInput[] = melds.map((m) => {
+        const cards = orderedMeldCards(m);
+        orderedById.set(m.id, cards);
+        return { id: m.id, count: cards.length };
       });
+      const layout = layoutSeatMelds(this.seatCount, dir.x, inputs);
+      for (const slot of layout.slots) {
+        const card = orderedById.get(slot.meldId)?.[slot.index];
+        if (!card) continue;
+        const id = cardId(card);
+        desired.add(id);
+        const p = dir
+          .clone()
+          .multiplyScalar(slot.u)
+          .addScaledVector(tangent, slot.v)
+          .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.05 + ySeq * 0.006, 0));
+        ySeq++;
+        this.place(id, card, p, quat, now, 0, deckPos, slot.meldId, layout.scale);
+      }
     }
 
     // 3) 捨て札（面表示・中央やや左に散らし、決定的ジッタ）。山札(+x)と近接しつつ重ならないよう
@@ -580,13 +561,14 @@ export class TableScene {
     delay: number,
     spawnPos: THREE.Vector3,
     meldId?: number,
+    targetScale = 1,
   ): void {
     let obj = this.known.get(id);
     if (!obj) {
       const group = this.buildCard(card);
       group.position.copy(spawnPos);
       group.quaternion.copy(quat);
-      group.scale.setScalar(0.55); // 出現ポップ（loop で 1 へイージング）
+      group.scale.setScalar(targetScale * 0.55); // 出現ポップ（loop で targetScale へイージング）
       this.scene.add(group);
       obj = {
         id,
@@ -598,6 +580,7 @@ export class TableScene {
         removing: false,
         removeAt: 0,
         spawned: false,
+        targetScale,
         meldId,
       };
       this.known.set(id, obj);
@@ -605,7 +588,7 @@ export class TableScene {
       obj.targetPos.copy(pos);
       obj.targetQuat.copy(quat);
       obj.removing = false;
-      obj.group.scale.setScalar(1);
+      obj.targetScale = targetScale; // メルド再配置でのスケール変化は loop が滑らかに追従（E3）
       obj.meldId = meldId;
     }
     // 付け札レイキャスト用にメルド所属をグループへ刻む（非メルドは null）
@@ -679,9 +662,9 @@ export class TableScene {
     this.attachableMelds = new Set(attachMeldIds); // dropTargetAt のメルド判定を付け札可能なものに限定（項目15b）
     this.discardRing.visible = true;
     this.dropRings.push({ mesh: this.discardRing, kind: 'discard', hot: false });
-    // 場（公開）リングは現手番席のメルドゾーンへ置く（公開カードが出る場所と一致）。
+    // 場（公開）リングは現手番席のメルドゾーン（中央保護の床のすぐ外＝row0 付近）へ置く。
     const dir = this.seatDir(this.viewYou);
-    this.fieldRing.position.copy(dir).multiplyScalar(SEAT_R * 0.62);
+    this.fieldRing.position.copy(dir).multiplyScalar(centerKeepout(dir.x) + 0.6);
     this.fieldRing.position.y = TABLE_TOP_Y + 0.06;
     this.fieldRing.visible = true;
     this.dropRings.push({ mesh: this.fieldRing, kind: 'field', hot: false });
@@ -915,6 +898,7 @@ export class TableScene {
         removing: false,
         removeAt: 0,
         spawned: true,
+        targetScale: 1,
       });
     }
     this.backPool.forEach((obj, i) => {
@@ -1294,11 +1278,11 @@ export class TableScene {
         obj.group.position.lerp(obj.targetPos, k);
         obj.group.quaternion.slerp(obj.targetQuat, k);
         if (!obj.removing) {
+          const ts = obj.targetScale;
           const s = obj.group.scale.x;
-          if (s < 0.999) {
-            const ns = s + (1 - s) * k;
-            obj.group.scale.setScalar(ns);
-            motion += 1 - s;
+          if (Math.abs(s - ts) > 0.001) {
+            obj.group.scale.setScalar(s + (ts - s) * k);
+            motion += Math.abs(ts - s);
           }
         }
       } else {
@@ -1306,7 +1290,8 @@ export class TableScene {
       }
       if (obj.removing) {
         busy = true;
-        const s = Math.max(0, 1 - (now - obj.removeAt) / 260);
+        // 退場フェードは目標スケール基準（縮小メルドが退場時に一瞬拡大しない）
+        const s = obj.targetScale * Math.max(0, 1 - (now - obj.removeAt) / 260);
         obj.group.scale.setScalar(s);
         if (s <= 0.001) {
           this.scene.remove(obj.group);
