@@ -5,12 +5,32 @@ import { joinRoom, selfId } from 'trystero';
 import { APP_ID, type Sender, type Receiver, type Transport } from './protocol';
 
 /**
+ * Nostr リレーの明示指定（2026-08-10 障害対応）。
+ * trystero デフォルトのリレー群に有料化(nfdb.noswhere.com)・I/O障害(nostr.huszonegy.world)が
+ * 発生しピア発見が不安定になったため、ブラウザから実測して生存確認済みの無料リレーを指定する。
+ * 冗長度5で部分障害に耐える。リレーが劣化したらここを実測し直して更新すること。
+ */
+const RELAY_URLS = [
+  'wss://offchain.pub',
+  'wss://nos.lol',
+  'wss://relay.snort.social',
+  'wss://relay.primal.net',
+  'wss://nostr-pub.wellorder.net',
+  'wss://nostr.wine',
+  'wss://relay.nostr.net',
+  'wss://nostr.mom',
+];
+
+/**
  * ルームコードで部屋へ参加し Transport を返す。
  * appId で名前空間を切り、roomId=コード、password=コードで E2E 暗号化する
  * （コードを知る者だけが復号でき、他ルームと混線しない）。
  */
 export function createTrysteroTransport(code: string): Transport {
-  const room = joinRoom({ appId: APP_ID, password: code }, code);
+  const room = joinRoom(
+    { appId: APP_ID, password: code, relayUrls: RELAY_URLS, relayRedundancy: 5 },
+    code,
+  );
 
   return {
     selfId,
