@@ -28,7 +28,10 @@ export function createPostFX(
   try {
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
-    const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.75, 0.82);
+    // 2026-08-11 白飛び修正: 閾値0.82は白カード面の通常輝度が超えてしまいPC(高ティア)で
+    // カードが読めなくなった（ユーザー報告）。閾値1.0=トーンマッピング前のHDR超過
+    // （加算合成の光輪・パーティクル・強スポット直下）だけが滲む設定にし、強度・半径も抑制。
+    const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.3, 0.45, 1.0);
     composer.addPass(bloom);
     composer.addPass(new OutputPass());
     composer.setSize(w, h);
