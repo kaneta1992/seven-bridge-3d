@@ -54,6 +54,13 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 - scene.ts は視覚上の共面回避に y 微差を多用。カード配置をいじるときは distinctY を壊さないこと
 - ドラッグ中の再描画競合: 並び替え実装はドラッグ中の driver 再描画を保留する設計（詳細は app.ts の attachHandPointer 周辺コメント）
 
+## 通信UX（R9以降）
+- `src/net/lobbyChannel.ts`: 公開ルーム一覧（固定ロビーチャネル LOBBY_ROOM への定期広告・受信側TTL・送受信両側 sanitizeRoomAd で {code,hostName,count,rounds} 以外を遮断）
+- `session.recover()`: visibilitychange/pageshow/online で自動回復（再join・再アナウンス・ホストはスナップ再送・1.5sデバウンス・冪等）
+- 人数はルーム作成時に指定しない（SEAT_CAP=6 内部定数）。開始時の名簿人数で確定
+- 招待: Web Share ボタン + `?room=CODE` URL直行参加（保存名で自動join・replaceStateでループ防止）
+- ルール変更履歴: 親=前ラウンド勝者（流局は継続）/ 開始時めくり札なし / シークエンスは循環ラップ許可（isConsecutiveRun=円環アーク判定・meldSortも循環整列）/ 鳴き10秒・鳴きUIは本人のみ表示 / 自動ツモ
+
 ## 演出レイヤ（R5以降）
 - `src/render/particles.ts`（プール制・1種別1drawコールのShaderMaterial粒子）/ `postfx.ts`（EffectComposer+Bloom、失敗時素renderフォールバック）/ `quality.ts`（モバイル自動品質: DPR/Bloom/影/粒子キャップ）
 - `src/ui/callout.ts`（大型コールアウト・バナー・カウントアップ）/ `audio.ts`（WebAudioプロシージャルSFX・ミュート永続）
