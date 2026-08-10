@@ -1,4 +1,6 @@
 // スコア票（ラウンド×プレイヤーの失点マトリクス＋各ラウンド合計＋累計）。要件 §2.6 / §3.3-4。
+// 各セルは「そのラウンドの失点」と「その時点の累計（=そのプレイヤーの R1..r の失点合計）」を2段で併記する
+// （契約09 項目3）。行末「行計」列・最下段「累計」行は従来どおり維持。横に長い表はラッパで横スクロール。
 import type { PlayerView } from '../core';
 import { el } from './dom';
 
@@ -13,17 +15,21 @@ export function buildScoreTable(view: PlayerView, winners: string[] = []): HTMLE
   head.append(el('th', { text: '行計' }));
   table.append(head);
 
-  const totals = new Array<number>(n).fill(0);
+  const totals = new Array<number>(n).fill(0); // 各プレイヤー列の縦累積（= その時点の累計）
   view.scores.forEach((row, r) => {
     const tr = el('tr', {}, [el('th', { text: `R${r + 1}` })]);
     let rowSum = 0;
     for (let i = 0; i < n; i++) {
-      const v = row[i] ?? 0;
+      const raw = row[i];
+      const v = raw ?? 0;
       totals[i]! += v;
       rowSum += v;
-      tr.append(el('td', { text: String(v) }));
+      // 未消化/欠損セルは失点を「—」表示（累計はその時点の値を出す・E1）。
+      const pt = el('span', { class: 'pt', text: raw == null ? '—' : String(v) });
+      const cum = el('span', { class: 'cum', text: `計${totals[i]}` });
+      tr.append(el('td', { class: 'cell' }, [pt, cum]));
     }
-    tr.append(el('td', { text: String(rowSum) }));
+    tr.append(el('td', { class: 'rowsum', text: String(rowSum) }));
     table.append(tr);
   });
 
@@ -42,5 +48,7 @@ export function buildScoreTable(view: PlayerView, winners: string[] = []): HTMLE
   }
   foot.append(el('td', { text: String(grand) }));
   table.append(foot);
-  return table;
+
+  // 横スクロールラッパ（6人×多ラウンドでもモーダル内で崩れず、はみ出し分だけ横スクロール・E1）。
+  return el('div', { class: 'score-wrap' }, [table]);
 }

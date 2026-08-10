@@ -212,6 +212,12 @@ export class ParticleSystem {
     scene.add(this.confetti.points);
   }
 
+  /** パーティクルを選択的 Bloom の対象レイヤへ載せる（発光を滲ませる・契約09項目1/2）。 */
+  setBloomLayer(layer: number): void {
+    this.sparks.points.layers.enable(layer);
+    this.confetti.points.layers.enable(layer);
+  }
+
   setScale(uScale: number): void {
     this.sparks.setScale(uScale);
     this.confetti.setScale(uScale);

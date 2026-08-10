@@ -432,16 +432,42 @@ select:focus {
 }
 
 /* スコア票 */
+/* 横スクロールラッパ: 6人×多ラウンドで幅が溢れてもモーダル内で崩れず横スクロールに収める（契約09 E1）。 */
+.score-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
 table.score {
   width: 100%;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
+  min-width: max-content; /* 列がつぶれず、溢れた分だけラッパが横スクロール */
 }
 table.score th,
 table.score td {
   border: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 7px 9px;
   text-align: center;
+  white-space: nowrap;
+}
+/* 各セルは「そのラウンドの失点（pt）」と「その時点の累計（cum）」を2段表示（契約09 項目3）。 */
+table.score td.cell {
+  padding: 5px 9px;
+  line-height: 1.15;
+}
+table.score td.cell .pt {
+  display: block;
+  font-weight: 700;
+}
+table.score td.cell .cum {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72em;
+  color: var(--muted);
+}
+table.score td.rowsum {
+  font-weight: 700;
 }
 table.score th {
   background: rgba(255, 255, 255, 0.06);

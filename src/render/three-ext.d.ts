@@ -46,3 +46,7 @@ declare module 'three/examples/jsm/postprocessing/OutputPass.js' {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export class OutputPass { [k: string]: any; constructor(...a: any[]); }
 }
+declare module 'three/examples/jsm/postprocessing/ShaderPass.js' {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  export class ShaderPass { [k: string]: any; constructor(...a: any[]); }
+}

@@ -10,7 +10,7 @@ import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from 
 import { disposeFelt, feltTexture } from './felt';
 import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
-import { createPostFX, type PostFX } from './postfx';
+import { BLOOM_LAYER, createPostFX, type PostFX } from './postfx';
 import { detectQuality, type QualityTier } from './quality';
 
 const CARD_W = 0.72;
@@ -21,7 +21,7 @@ const SEAT_R = 2.55; // 席の半径
 const HAND_SPACING = 0.52;
 const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
 const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延）
-const MAX_RINGS = 5; // 光輪（ショックウェーブ）の同時上限
+const MAX_RINGS = 10; // 光輪（ショックウェーブ）の同時上限（派手化で二重リングを出すため増量・契約09項目2）
 const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の中心（update と一致）
 const DISCARD_R = 0.62; // 捨て札ドロップ判定の半径（山札 +0.5 と干渉しない大きさ）
 const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓外＝取り消し）
@@ -111,7 +111,7 @@ export class TableScene {
   private camKick = 0; // カメラパンチの残量（減衰）
   private freshDeal = false; // clearCards 直後の一括配札（スタッガ演出）
   private ringGeo!: THREE.RingGeometry;
-  private rings: { mesh: THREE.Mesh; t: number; dur: number; r0: number; r1: number }[] = [];
+  private rings: { mesh: THREE.Mesh; t: number; dur: number; r0: number; r1: number; op: number }[] = [];
 
   // 3D ドロップ標的の視覚化（契約05項目1）: 捨て札リング・場（公開）リング・付け札メルドの光枠。
   private tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(TABLE_TOP_Y + 0.04));
@@ -193,6 +193,7 @@ export class TableScene {
     this.ringGeo = new THREE.RingGeometry(0.86, 1.0, 48);
     this.particles = new ParticleSystem(this.quality.sparkCap, this.quality.confettiCap, this.particleScale());
     this.particles.addTo(this.scene);
+    this.particles.setBloomLayer(BLOOM_LAYER); // エフェクト粒子を選択的Bloomの対象に（カードは非対象）
 
     this.buildEnvironment();
     this.buildDropIndicators();
@@ -643,6 +644,7 @@ export class TableScene {
       m.position.y = TABLE_TOP_Y + 0.06;
       m.renderOrder = 8;
       m.visible = false;
+      m.layers.enable(BLOOM_LAYER); // ドロップ光枠も発光として滲ませる
       this.scene.add(m);
       return m;
     };
@@ -679,6 +681,7 @@ export class TableScene {
       ring.rotation.x = -Math.PI / 2;
       ring.position.set(c.x, TABLE_TOP_Y + 0.09, c.z);
       ring.renderOrder = 8;
+      ring.layers.enable(BLOOM_LAYER);
       this.scene.add(ring);
       this.activeMeldRings.push(ring);
       this.dropRings.push({ mesh: ring, kind: 'meld', meldId: id, hot: false });
@@ -925,33 +928,47 @@ export class TableScene {
     return dir.clone().multiplyScalar(SEAT_R * radialK).setY(TABLE_TOP_Y + 0.12);
   }
 
-  /** メルド公開の決め演出: 金色スパーク + 光輪 + 軽いカメラパンチ。 */
+  /** メルド公開の決め演出: 金色の大型スパーク + 二重光輪 + 打ち上げの粉塵 + カメラパンチ（契約09項目2）。 */
   publishEffect(seatIndex: number): void {
     const p = this.seatSpot(seatIndex);
-    this.particles.burst(p, { count: 30, color: [1, 0.82, 0.36], speed: 2.4, size: 0.1, life: 0.75 });
-    this.spawnRing(p, '#ffd873');
-    this.cameraPunch(0.5);
+    // 発光スパーク（数・初速・寿命を増強）+ 上方へ吹き上げる金の火の粉
+    this.particles.burst(p, { count: 52, color: [1, 0.85, 0.4], speed: 3.0, size: 0.13, life: 0.95 });
+    this.particles.burst(p, { count: 22, color: [1, 0.95, 0.62], speed: 4.4, size: 0.08, life: 1.2, spread: 0.15, gravity: 0.6 });
+    // 二重光輪（芯の速いリング + 外へ広がる余波リング）
+    this.spawnRing(p, '#ffe6a0', { r1: 2.2, dur: 0.5, opacity: 1.0 });
+    this.spawnRing(p, '#ffd873', { r1: 3.4, dur: 0.8, opacity: 0.7, delay: 0.09 });
+    this.cameraPunch(0.7);
     this.wake();
   }
 
-  /** ポン/チーの鳴き演出: 種別で色分けしたスパーク + 光輪 + 強めのカメラパンチ。 */
+  /** ポン/チーの鳴き演出: 種別で色分けした大型スパーク + 二重光輪 + 強めのカメラパンチ（契約09項目2）。 */
   claimEffect(seatIndex: number, kind: 'pon' | 'chi'): void {
     const p = this.seatSpot(seatIndex);
     const color: [number, number, number] = kind === 'pon' ? [1, 0.45, 0.3] : [0.4, 0.72, 1];
-    this.particles.burst(p, { count: 40, color, speed: 3.0, size: 0.12, life: 0.8, spread: 1 });
-    this.spawnRing(p, kind === 'pon' ? '#ff7a4d' : '#66b6ff');
-    this.cameraPunch(0.85);
+    const ringA = kind === 'pon' ? '#ff9a6a' : '#8fd0ff';
+    const ringB = kind === 'pon' ? '#ff7a4d' : '#66b6ff';
+    this.particles.burst(p, { count: 64, color, speed: 3.6, size: 0.14, life: 0.95, spread: 1 });
+    this.particles.burst(p, { count: 24, color, speed: 5.0, size: 0.09, life: 0.7, spread: 0.2, gravity: 0.5 });
+    this.spawnRing(p, ringA, { r1: 2.4, dur: 0.5, opacity: 1.0 });
+    this.spawnRing(p, ringB, { r1: 3.8, dur: 0.85, opacity: 0.7, delay: 0.1 });
+    this.cameraPunch(1.05);
     this.wake();
   }
 
-  /** 上がり/ラウンド終了のセレブレーション: 卓上に紙吹雪噴水 + 金スパーク + カメラパンチ。 */
+  /** 上がり/ラウンド終了のセレブレーション: 紙吹雪噴水 + 金スパーク噴水 + 三重光輪 + カメラパンチ（契約09項目2）。 */
   celebrate(seatIndex: number): void {
     const p = this.seatSpot(seatIndex, 0.4);
     const fountain = new THREE.Vector3(0, TABLE_TOP_Y + 0.2, 0);
-    this.particles.confettiFountain(fountain, Math.min(this.quality.confettiCap, 240));
-    this.particles.burst(p, { count: 44, color: [1, 0.9, 0.5], speed: 3.2, size: 0.13, life: 1.1 });
-    this.spawnRing(p, '#ffe08a');
-    this.cameraPunch(1.0);
+    // 紙吹雪を大増量（キャップ内）。虹色×多量で Bloom 無効なモバイルでも見た目に派手（E2）。
+    this.particles.confettiFountain(fountain, Math.min(this.quality.confettiCap, 400));
+    // 金の噴水スパーク + 席前の放射バースト
+    this.particles.burst(fountain, { count: 40, color: [1, 0.92, 0.55], speed: 5.2, size: 0.12, life: 1.3, spread: 0.35, gravity: 0.8 });
+    this.particles.burst(p, { count: 56, color: [1, 0.9, 0.5], speed: 3.6, size: 0.15, life: 1.2 });
+    // 卓中央から広がる三重の祝祭リング（時間差で波状に）
+    this.spawnRing(fountain, '#fff0c0', { r1: 2.6, dur: 0.6, opacity: 1.0 });
+    this.spawnRing(fountain, '#ffe08a', { r1: 4.0, dur: 0.9, opacity: 0.78, delay: 0.12 });
+    this.spawnRing(fountain, '#ffd066', { r1: 5.2, dur: 1.15, opacity: 0.55, delay: 0.26 });
+    this.cameraPunch(1.25);
     this.wake();
   }
 
@@ -961,15 +978,23 @@ export class TableScene {
     this.wake();
   }
 
-  private spawnRing(pos: THREE.Vector3, color: string): void {
+  private spawnRing(
+    pos: THREE.Vector3,
+    color: string,
+    opts: { r0?: number; r1?: number; dur?: number; opacity?: number; delay?: number } = {},
+  ): void {
     if (this.rings.length >= MAX_RINGS) {
       const old = this.rings.shift();
-      if (old) this.scene.remove(old.mesh);
+      if (old) {
+        this.scene.remove(old.mesh);
+        (old.mesh.material as { dispose?: () => void }).dispose?.();
+      }
     }
+    const op = opts.opacity ?? 0.85;
     const mat = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0,
       depthWrite: false,
       side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
@@ -978,8 +1003,10 @@ export class TableScene {
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.copy(pos);
     mesh.renderOrder = 9;
+    mesh.layers.enable(BLOOM_LAYER); // 光輪は発光として滲ませる（選択的Bloomの対象）
     this.scene.add(mesh);
-    this.rings.push({ mesh, t: 0, dur: 0.55, r0: 0.2, r1: 2.6 });
+    // delay<0 の間は待機（opacity 0）。二重・三重リングを時間差で波状に出すため。
+    this.rings.push({ mesh, t: -(opts.delay ?? 0), dur: opts.dur ?? 0.55, r0: opts.r0 ?? 0.2, r1: opts.r1 ?? 2.6, op });
   }
 
   private aimCameraAt(seatIndex: number): void {
@@ -1219,6 +1246,12 @@ export class TableScene {
     for (let i = this.rings.length - 1; i >= 0; i--) {
       const r = this.rings[i]!;
       r.t += dt;
+      if (r.t < 0) {
+        // 開始ディレイ待ち（時間差の波状リング）。まだ見せない。
+        r.mesh.material.opacity = 0;
+        fxBusy = true;
+        continue;
+      }
       const u = r.t / r.dur;
       if (u >= 1) {
         this.scene.remove(r.mesh);
@@ -1228,7 +1261,7 @@ export class TableScene {
       }
       const ease = 1 - (1 - u) * (1 - u); // easeOutQuad
       r.mesh.scale.setScalar(r.r0 + (r.r1 - r.r0) * ease);
-      r.mesh.material.opacity = 0.85 * (1 - u);
+      r.mesh.material.opacity = r.op * (1 - u);
       fxBusy = true;
     }
 
