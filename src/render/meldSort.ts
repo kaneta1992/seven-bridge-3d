@@ -5,13 +5,12 @@ import type { Card, Meld } from '../core';
 import { SUITS } from '../core';
 
 const suitOrder = (s: Card['suit']): number => SUITS.indexOf(s);
-const isAscending = (vals: readonly number[]): boolean =>
-  vals.every((v, i) => i === 0 || v === vals[i - 1]! + 1);
 
 /**
  * メルドのカードを表示順に整列した新規配列で返す（元配列は変更しない）。
- * - sequence: ランク昇順。低位解釈で連番にならない場合のみ A(1) を高位(14)として扱う
- *   （A-2-3 は A が先頭、Q-K-A は A が末尾）。付け札や公開時のバラ順もこれで復元される。
+ * - sequence: 循環アークとして整列（2026-08-10 ラップ許可対応）。アークの起点
+ *   （循環で1つ前のランクが列に無いカード）から円環順に並べる。
+ *   A-2-3 は A 先頭 / Q-K-A は A 末尾 / K-A-2 は K,A,2 の順になる。
  * - group: 同ランクなのでスート順（C→D→H→S）で安定表示。
  * - lone7 / それ以外: 元の順序のコピー（単独7は1枚なので不変）。
  */
@@ -21,11 +20,19 @@ export function orderedMeldCards(meld: Meld): Card[] {
     return cards.sort((a, b) => suitOrder(a.suit) - suitOrder(b.suit));
   }
   if (meld.kind === 'sequence') {
-    const low = cards.slice().sort((a, b) => a.rank - b.rank);
-    if (isAscending(low.map((c) => c.rank))) return low;
-    // 低位で連番にならない＝A を含む高位並び（…Q-K-A）。A を 14 とみなして昇順。
-    const high = (r: number): number => (r === 1 ? 14 : r);
-    return cards.sort((a, b) => high(a.rank) - high(b.rank));
+    const ranks = new Set<number>(cards.map((c) => c.rank));
+    let start: number = cards[0]!.rank;
+    if (ranks.size < 13) {
+      for (const c of cards) {
+        const prev = ((c.rank - 2 + 13) % 13) + 1; // 円環上で1つ前のランク
+        if (!ranks.has(prev)) {
+          start = c.rank;
+          break;
+        }
+      }
+    }
+    const pos = (r: number): number => (r - start + 13) % 13;
+    return cards.sort((a, b) => pos(a.rank) - pos(b.rank));
   }
   return cards;
 }

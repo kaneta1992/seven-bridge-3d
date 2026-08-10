@@ -22,18 +22,18 @@ describe('配札とディーラー移動 (E1: 2人/6人境界・最初のツモ�
     const s = ok(g, { type: 'startRound' });
     expect(s.round).toBe(1);
     expect(s.players.every((p) => p.hand.length === 7)).toBe(true);
-    expect(s.discardPile.length).toBe(1);
-    expect(s.deck.length).toBe(52 - 14 - 1); // 37
+    expect(s.discardPile.length).toBe(0); // 開始時のめくり札なし（2026-08-10 変更）
+    expect(s.deck.length).toBe(52 - 14); // 38
     expect(s.dealerIndex).toBe(0);
     expect(s.currentPlayerIndex).toBe(1); // ディーラーの左隣
     expect(s.phase).toBe('awaitingDraw');
   });
 
-  it('6人戦の山札枚数は 52-42-1=9', () => {
+  it('6人戦の山札枚数は 52-42=10', () => {
     const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
     const g = createGame({ players: ids.map((id) => ({ id, name: id })), seed: 3 });
     const s = ok(g, { type: 'startRound' });
-    expect(s.deck.length).toBe(9);
+    expect(s.deck.length).toBe(10);
     expect(s.players.every((p) => p.hand.length === 7)).toBe(true);
   });
 

@@ -317,10 +317,9 @@ export function applyAction(prev: GameState, action: Action): ActionResult {
       for (let i = 0; i < n; i++) {
         state.players[i]!.hand = result.slice(i * HAND_SIZE, i * HAND_SIZE + HAND_SIZE);
       }
-      let idx = n * HAND_SIZE;
-      state.discardPile = [result[idx]!];
-      idx += 1;
-      state.deck = result.slice(idx);
+      // 捨て札の場は空で開始（2026-08-10 ユーザー指定: 開始時のめくり札を廃止）
+      state.discardPile = [];
+      state.deck = result.slice(n * HAND_SIZE);
       state.melds = [];
       state.meldCounter = 0;
       state.claimWindow = null;

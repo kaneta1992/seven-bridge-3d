@@ -19,22 +19,25 @@ export interface Meld {
 }
 
 /**
- * ランク列が連続する並びか（A絡み対応）。
- * A(1) は低位(A-2-3)としてそのまま、あるいは高位(…Q-K-A → 14)として扱う。
- * K-A-2 のラップは両解釈とも不連続になり自然に false。
+ * ランク列が循環連続する並びか（2026-08-10 ユーザー指定でラップ許可）。
+ * A-2-3 / Q-K-A に加え K-A-2 のような A をまたぐ連続も有効。
+ * 判定: 重複なしのランク集合が 13 周期の円環上で1本の連続弧を成すこと
+ * （昇順に並べ循環ギャップを数え、距離1でないギャップがちょうど1箇所なら弧。13枚全周も可）。
  */
 export function isConsecutiveRun(ranks: readonly number[]): boolean {
-  if (ranks.length === 0) return false;
-  if (new Set(ranks).size !== ranks.length) return false; // 重複は不可
-  const consec = (arr: number[]): boolean =>
-    arr.every((v, i) => i === 0 || v === arr[i - 1]! + 1);
-  const low = [...ranks].sort((a, b) => a - b);
-  if (consec(low)) return true;
-  if (ranks.includes(1)) {
-    const high = ranks.map((r) => (r === 1 ? 14 : r)).sort((a, b) => a - b);
-    if (consec(high)) return true;
+  const n = ranks.length;
+  if (n === 0) return false;
+  if (new Set(ranks).size !== n) return false; // 重複は不可
+  if (n === 13) return true; // 同スート全周
+  const s = [...ranks].sort((a, b) => a - b);
+  let bigGaps = 0;
+  for (let i = 0; i < n; i++) {
+    const cur = s[i]!;
+    const next = s[(i + 1) % n]!;
+    const gap = (((next - cur) % 13) + 13) % 13; // 円環上の前進距離
+    if (gap !== 1) bigGaps++;
   }
-  return false;
+  return bigGaps === 1;
 }
 
 function allSameSuit(cards: readonly Card[]): boolean {

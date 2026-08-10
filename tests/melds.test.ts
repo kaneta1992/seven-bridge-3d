@@ -11,7 +11,7 @@ import {
 import type { Meld } from '../src/core';
 import { c } from './helpers';
 
-describe('シークェンス判定 (E1: A絡み境界・ラップ不可)', () => {
+describe('シークェンス判定 (E1: A絡み境界・循環ラップ許可 2026-08-10)', () => {
   it('同スート連続3枚以上は有効', () => {
     expect(isValidSequence([c('S', 4), c('S', 5), c('S', 6)])).toBe(true);
     expect(isValidSequence([c('S', 4), c('S', 5), c('S', 6), c('S', 7)])).toBe(true);
@@ -22,8 +22,9 @@ describe('シークェンス判定 (E1: A絡み境界・ラップ不可)', () =>
   it('Q-K-A は可', () => {
     expect(isValidSequence([c('H', 12), c('H', 13), c('H', 1)])).toBe(true);
   });
-  it('K-A-2 のラップは不可', () => {
-    expect(isValidSequence([c('C', 13), c('C', 1), c('C', 2)])).toBe(false);
+  it('K-A-2 のラップは可（2026-08-10 ルール変更）', () => {
+    expect(isValidSequence([c('C', 13), c('C', 1), c('C', 2)])).toBe(true);
+    expect(isValidSequence([c('C', 12), c('C', 13), c('C', 1), c('C', 2), c('C', 3)])).toBe(true);
   });
   it('異スート混在・2枚以下・不連続は無効', () => {
     expect(isValidSequence([c('S', 4), c('H', 5), c('S', 6)])).toBe(false);
@@ -34,7 +35,9 @@ describe('シークェンス判定 (E1: A絡み境界・ラップ不可)', () =>
     expect(isConsecutiveRun([4, 5, 6])).toBe(true);
     expect(isConsecutiveRun([1, 2, 3])).toBe(true);
     expect(isConsecutiveRun([12, 13, 1])).toBe(true); // Q-K-A
-    expect(isConsecutiveRun([13, 1, 2])).toBe(false); // K-A-2
+    expect(isConsecutiveRun([13, 1, 2])).toBe(true); // K-A-2（ラップ許可）
+    expect(isConsecutiveRun([11, 12, 13, 1, 2])).toBe(true); // J-Q-K-A-2
+    expect(isConsecutiveRun([1, 3, 5])).toBe(false); // 不連続
     expect(isConsecutiveRun([4, 4, 5])).toBe(false); // 重複
   });
 });
@@ -104,10 +107,14 @@ describe('付け札の連続/グループ拡張', () => {
     expect(canAttach(seq, c('D', 10))).toBe(false); // 不連続
     expect(canAttach(seq, c('H', 8))).toBe(false); // 異スート
   });
-  it('Q-K-A シークェンスに2は付かない（ラップ不可）', () => {
+  it('Q-K-A シークェンスに2が付く（ラップ許可・2026-08-10 変更 — ユーザー報告のJQKA+2ケース）', () => {
     const seq: Meld = { id: 2, owner: 'p0', kind: 'sequence', cards: [c('H', 12), c('H', 13), c('H', 1)] };
     expect(canAttach(seq, c('H', 11))).toBe(true); // J-Q-K-A
-    expect(canAttach(seq, c('H', 2))).toBe(false);
+    expect(canAttach(seq, c('H', 2))).toBe(true); // Q-K-A-2（ラップ）
+    expect(canAttach(seq, c('H', 3))).toBe(false); // 飛びは不可
+    // ユーザー報告の実ケース: ♦J-Q-K-A に ♦2
+    const jqka: Meld = { id: 9, owner: 'p0', kind: 'sequence', cards: [c('D', 11), c('D', 12), c('D', 13), c('D', 1)] };
+    expect(canAttach(jqka, c('D', 2))).toBe(true);
   });
   it('グループは残スートのみ・4枚まで', () => {
     const grp: Meld = { id: 3, owner: 'p0', kind: 'group', cards: [c('S', 9), c('H', 9), c('D', 9)] };
