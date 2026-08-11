@@ -2470,8 +2470,10 @@ export class TableScene {
     if (this.particles.update(dt)) fxBusy = true;
 
     // ぬいぐるみ「見つめると反応する」リアクション（契約24）: 注視+ズーム検知→両体の transform 演出。
-    // busy（デバウンス中/演出中）は idle 停止を抑止する。reduced-motion は quality.cameraShake=false と一致。
-    if (this.plushReactions?.update(dt, this.camera, this.camTarget, this.cinematic, !this.quality.cameraShake)) {
+    // busy（デバウンス中/演出中）は idle 停止を抑止する。1.5秒の意図的な注視＋ズームでのみ発火する
+    // ユーザー起点の演出のため、prefers-reduced-motion でも抑制しない（Windows の「アニメーション効果」
+    // OFF で reduce が立つ環境ではハートが一切出ず「出ない」と見える不具合になっていた）。
+    if (this.plushReactions?.update(dt, this.camera, this.camTarget, this.cinematic, false)) {
       fxBusy = true;
     }
 

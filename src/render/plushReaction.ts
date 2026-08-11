@@ -56,6 +56,8 @@ export class PlushReactions {
   private dir = new THREE.Vector3();
   private tmpBox = new THREE.Box3();
   private tmpSize = new THREE.Vector3();
+  // 検証用: 直近 update() の判定入力（debugState で観測し、発火しない原因を切り分ける）
+  private lastIn: { fov: number; cinematic: boolean; zoomOK: boolean; dots: number[]; dt: number } | null = null;
 
   constructor(private particles: ParticleSystem) {}
 
@@ -98,6 +100,7 @@ export class PlushReactions {
     const fov: number = camera.fov;
     this.fwd.subVectors(camTarget, camPos).normalize();
     const zoomOK = fov <= ZOOM_FOV_MAX;
+    this.lastIn = { fov: +fov.toFixed(1), cinematic, zoomOK, dots: [], dt: +dt.toFixed(4) };
 
     for (const d of this.dolls) {
       // 進行中リアクションが最優先（クールダウンが切れても完了まで再発火しない・E8）。
@@ -108,7 +111,9 @@ export class PlushReactions {
 
       // 注視ジオメトリ: 頭部方向が視線の GAZE_COS 円錐内か（タイトルデモでは常に非注視・要求5）。
       this.dir.subVectors(d.head, camPos).normalize();
-      const inGaze = !cinematic && zoomOK && this.dir.dot(this.fwd) >= GAZE_COS;
+      const dot = this.dir.dot(this.fwd);
+      this.lastIn.dots.push(+dot.toFixed(4));
+      const inGaze = !cinematic && zoomOK && dot >= GAZE_COS;
 
       if (inGaze && d.armed && now >= d.cooldownUntil) {
         d.gazeT += dt;
@@ -176,7 +181,7 @@ export class PlushReactions {
       rotZ = d.homeRotZ + dirSign * (r.reduced ? 0.03 : 0.1) * Math.sin(Math.PI * hop);
     }
     this.applyTransform(d, f, lift, this.turnYaw(d, r, u), rotZ);
-    this.maybeHearts(d, r, 12);
+    this.maybeHearts(d, r, 4); // ハート形は大粒なので少数で十分（多いと形が重なって読めない）
   }
 
   /** ダルメシアン: カメラへ向き直り＋大きく左右に揺れて（ロール）＋高く2回はねる（派手化）。 */
@@ -192,7 +197,7 @@ export class PlushReactions {
     const swayAmp = r.reduced ? 0.06 : 0.24;
     const rotZ = d.homeRotZ + swayAmp * arch * Math.sin(t * 10);
     this.applyTransform(d, f, lift, this.turnYaw(d, r, u), rotZ);
-    this.maybeHearts(d, r, 13);
+    this.maybeHearts(d, r, 5);
   }
 
   /** カメラの方へ向き直り、終わりに元のヨーへ戻す（up[0,0.28]→hold→down[0.72,1]・u=1でホーム）。 */
@@ -257,6 +262,8 @@ export class PlushReactions {
     const r = (n: number): number => +n.toFixed(3);
     return {
       ready: true,
+      lastIn: this.lastIn,
+      particles: this.particles.debugCounts(),
       params: { gazeCos: r(GAZE_COS), zoomFovMax: ZOOM_FOV_MAX, gazeHold: GAZE_HOLD, cooldown: COOLDOWN },
       dolls: this.dolls.map((d) => ({
         kind: d.kind,

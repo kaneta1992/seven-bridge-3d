@@ -31,6 +31,24 @@ const FRAG = `
   }
 `;
 
+// ハート形の粒子（ぬいぐるみリアクション用）。丸い光点では小さすぎて「ハート」と読めなかったため、
+// 陰関数 (x²+y²-a)³ - x²y³ < 0 でハート形を切り抜く専用フラグメントシェーダを使う。
+// 輪郭は fwidth 相当の固定幅 smoothstep（粒子は小さいので十分）＋中心を白寄りに明るくして可愛く見せる。
+const FRAG_HEART = `
+  varying float vAlpha;
+  varying vec3 vColor;
+  void main() {
+    vec2 p = (gl_PointCoord - vec2(0.5)) * vec2(2.3, -2.3); // y を上向きに反転
+    p.y += 0.18; // ハートの重心を中央へ
+    float a = p.x * p.x + p.y * p.y - 0.34;
+    float d = a * a * a - p.x * p.x * p.y * p.y * p.y;
+    if (d > 0.0) discard;
+    float edge = smoothstep(0.0, -0.02, d); // 輪郭を軽くなめす
+    vec3 c = mix(vColor, vec3(1.0), 0.35 * smoothstep(-0.005, -0.05, d)); // 中心ほど白く
+    gl_FragColor = vec4(c, vAlpha * edge);
+  }
+`;
+
 interface EmitOpts {
   count: number;
   color: [number, number, number] | (() => [number, number, number]);
@@ -63,7 +81,7 @@ class Pool {
   private drag: Float32Array;
   private size0: Float32Array;
 
-  constructor(cap: number, blending: number, uScale: number) {
+  constructor(cap: number, blending: number, uScale: number, frag: string = FRAG) {
     this.cap = cap;
     this.pos = new Float32Array(cap * 3);
     this.col = new Float32Array(cap * 3);
@@ -88,7 +106,7 @@ class Pool {
     this.mat = new THREE.ShaderMaterial({
       uniforms: { uScale: { value: uScale } },
       vertexShader: VERT,
-      fragmentShader: FRAG,
+      fragmentShader: frag,
       transparent: true,
       depthWrite: false,
       blending,
@@ -100,6 +118,11 @@ class Pool {
 
   setScale(uScale: number): void {
     this.mat.uniforms.uScale.value = uScale;
+  }
+
+  /** 検証用: 生存粒子数。 */
+  get count(): number {
+    return this.n;
   }
 
   emit(
@@ -201,26 +224,32 @@ class Pool {
 export class ParticleSystem {
   private sparks: Pool;
   private confetti: Pool;
+  private heartPool: Pool;
 
   constructor(sparkCap: number, confettiCap: number, uScale: number) {
     this.sparks = new Pool(sparkCap, THREE.AdditiveBlending ?? 2, uScale);
     this.confetti = new Pool(confettiCap, THREE.NormalBlending ?? 1, uScale);
+    // ハートは形が読めることが命なので通常合成（加算だと背景と混ざって形が飛ぶ）。同時数は控えめで足りる。
+    this.heartPool = new Pool(96, THREE.NormalBlending ?? 1, uScale, FRAG_HEART);
   }
 
   addTo(scene: THREE.Scene): void {
     scene.add(this.sparks.points);
     scene.add(this.confetti.points);
+    scene.add(this.heartPool.points);
   }
 
   /** パーティクルを選択的 Bloom の対象レイヤへ載せる（発光を滲ませる・契約09項目1/2）。 */
   setBloomLayer(layer: number): void {
     this.sparks.points.layers.enable(layer);
     this.confetti.points.layers.enable(layer);
+    this.heartPool.points.layers.enable(layer);
   }
 
   setScale(uScale: number): void {
     this.sparks.setScale(uScale);
     this.confetti.setScale(uScale);
+    this.heartPool.setScale(uScale);
   }
 
   /** 加算合成の発光バースト（メルド公開・ポン・チーの決め演出）。 */
@@ -263,33 +292,36 @@ export class ParticleSystem {
   }
 
   /**
-   * ぬいぐるみリアクションの小さなハート粒子（契約24）。頭上からふわっと立ち昇る桃色/白の光点。
-   * 加算合成のスパークプールを流用（丸い柔らかな光＝キラキラのハート表現）。上向き・低重力でゆっくり漂う。
+   * ぬいぐるみリアクションのハート粒子（契約24）。頭上からふわっと立ち昇る桃色のハート形。
+   * 以前は丸い光点の流用で「細かすぎてハートに見えない」ため、ハート形シェーダの専用プールで
+   * 大きめ・少なめに出す（形が読めるサイズ＝旧比約3倍）。上向き・負の重力でゆっくり漂う。
    */
-  hearts(pos: THREE.Vector3, count = 14): void {
+  hearts(pos: THREE.Vector3, count = 5): void {
     const palette: [number, number, number][] = [
+      [1.0, 0.3, 0.5], // 濃桃（形が読めるよう彩度高め）
       [1.0, 0.45, 0.62], // 桃
-      [1.0, 0.72, 0.82], // 淡桃
-      [1.0, 0.95, 0.98], // 白ピンク
+      [1.0, 0.6, 0.74], // 淡桃
     ];
     for (let k = 0; k < count; k++) {
       const c = palette[(Math.random() * palette.length) | 0]!;
       const theta = Math.random() * Math.PI * 2;
-      const rad = Math.random() * 0.14;
-      this.sparks.emit(
+      const rad = Math.random() * 0.16;
+      // 上昇は控えめ（速いとズーム画角の上端からすぐ消えて「出ていない」ように見える）。
+      // 頭上にふわふわ漂って消える＝マンガ的な「好き好きハート」の見え方を優先する。
+      this.heartPool.emit(
         pos.x + Math.cos(theta) * rad,
-        pos.y,
+        pos.y + Math.random() * 0.12,
         pos.z + Math.sin(theta) * rad,
-        (Math.random() - 0.5) * 0.5,
-        0.9 + Math.random() * 0.7, // 上へふわり
-        (Math.random() - 0.5) * 0.5,
+        (Math.random() - 0.5) * 0.3,
+        0.3 + Math.random() * 0.3, // ゆっくり上へ
+        (Math.random() - 0.5) * 0.3,
         c[0]!,
         c[1]!,
         c[2]!,
-        0.07 + Math.random() * 0.05,
-        0.9 + Math.random() * 0.6,
-        -0.35, // 負の重力＝ゆるく上昇し続ける
-        1.6,
+        0.2 + Math.random() * 0.12,
+        1.3 + Math.random() * 0.6,
+        -0.08, // ごく弱い負の重力＝漂う程度に上昇
+        1.2,
       );
     }
   }
@@ -327,14 +359,21 @@ export class ParticleSystem {
     }
   }
 
+  /** 検証用: 各プールの生存粒子数（ぬいぐるみリアクションのハート放出の実測に使う）。 */
+  debugCounts(): { sparks: number; confetti: number; hearts: number } {
+    return { sparks: this.sparks.count, confetti: this.confetti.count, hearts: this.heartPool.count };
+  }
+
   update(dt: number): boolean {
     const a = this.sparks.update(dt);
     const b = this.confetti.update(dt);
-    return a || b;
+    const c = this.heartPool.update(dt);
+    return a || b || c;
   }
 
   dispose(): void {
     this.sparks.dispose();
     this.confetti.dispose();
+    this.heartPool.dispose();
   }
 }
