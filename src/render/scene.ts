@@ -14,7 +14,7 @@ import { buildPlushDolls, disposePlushTextures } from './plush';
 import { PlushReactions } from './plushReaction';
 import { HIDE_SPOTS, hashSeed, type HideSpot } from './hideSpots';
 import { makeFloorWood, makeWallPaper, makeCeilingWood, makeRugPattern } from './roomTextures';
-import { shuffle } from '../core';
+import { nextRng, shuffle } from '../core';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
@@ -224,6 +224,8 @@ export class TableScene {
   private rugMesh: THREE.Mesh | null = null;
   /** かくれんぼ発見通知（初回注視リアクション時に一度だけ・app がコールアウト/SFXへ接続）。 */
   onHiddenFound: ((kind: 'dalmatian' | 'panda') => void) | null = null;
+  // 検証用（契約29追補）: __spotShot が置くテスト個体（常に1体・呼ぶたび置き直す）
+  private testPlush: THREE.Object3D | null = null;
   // ぬいぐるみ「見つめると反応する」リアクション（契約24）。注視+ズーム検知→両体の transform 演出。
   private plushReactions: PlushReactions | null = null;
   // リアクションの効果音トリガ（app.ts が AudioKit へ接続する・src/render は音を持たない）。
@@ -873,28 +875,21 @@ export class TableScene {
       [first, 'panda'],
       [second, 'dalmatian'],
     ];
-    const bb = new THREE.Box3();
-    const ray = new THREE.Raycaster();
+    // 難化ジッター（2026-08-12 ユーザー要望「もっと難しく」）: 同じシードから決定的に導出する
+    // 向き±30°とスケール0.8〜1.0の揺らぎ。全クライアント同一（同期安全）でシルエットを読みにくくする。
+    let rs = hashSeed(`${this.hideSeed}#jitter`);
+    const rnd = (): number => {
+      const step = nextRng(rs);
+      rs = step.state;
+      return step.value;
+    };
     for (const [p, kind] of picks) {
-      const clone = (kind === 'panda' ? panda : dal).clone(true);
-      clone.rotation.set(0, p.yaw, 0);
-      clone.scale.multiplyScalar(p.s);
-      clone.position.set(p.x, 0, p.z);
-      clone.updateMatrixWorld(true);
-      bb.setFromObject(clone);
-      clone.position.y += p.y - bb.min.y; // バウンディング底面を候補地の接地面へ
-      // 接地スナップ（契約29）: 家具GLBの実サーフェス（棚段・天面・座面・額のふち）へ吸着し、
-      // カタログの目測高さの誤差（浮き/めり込み）を実測で吸収する。スポット選択はシード同期のまま
-      // ＝吸着は各端末の見た目補正のみで同期に影響しない。GLB未ロード時はカタログ値のまま。
-      if (this.roomGlb) {
-        ray.set(new THREE.Vector3(p.x, p.y + 0.6, p.z), new THREE.Vector3(0, -1, 0));
-        const hit = ray
-          .intersectObject(this.roomGlb, true)
-          .find((h: { point: { y: number } }) => h.point.y > p.y - 0.35 && h.point.y < p.y + 0.55);
-        if (hit) clone.position.y += hit.point.y - p.y;
-      }
-      clone.updateMatrixWorld(true);
-      this.scene.add(clone);
+      const jittered: HideSpot = {
+        ...p,
+        yaw: p.yaw + (rnd() - 0.5) * 1.05,
+        s: Math.max(0.3, p.s * (0.8 + rnd() * 0.2)),
+      };
+      const clone = this.placeCloneAt(jittered, kind === 'panda' ? panda : dal);
       this.hiddenPlush.push(clone);
       // 発見＝ズーム注視の初回リアクション発火。以降の再注視はリアクションのみ（通知は一度だけ）。
       let found = false;
@@ -905,6 +900,33 @@ export class TableScene {
       });
     }
     this.wake();
+  }
+
+  /**
+   * 候補地 p へクローンを接地配置してシーンへ加える（かくれんぼ本配置と検証プローブの共通部・契約29）。
+   * バウンディング底面→接地面、その後 家具GLBの実サーフェスへ下向きレイキャストで吸着。
+   */
+  private placeCloneAt(p: HideSpot, src: THREE.Object3D): THREE.Object3D {
+    const clone = src.clone(true);
+    clone.rotation.set(0, p.yaw, 0);
+    clone.scale.multiplyScalar(p.s);
+    clone.position.set(p.x, 0, p.z);
+    clone.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(clone);
+    clone.position.y += p.y - bb.min.y; // バウンディング底面を候補地の接地面へ
+    // 接地スナップ（契約29）: 実サーフェス（棚段・天面・座面）へ吸着し目測高さの誤差を吸収。
+    // スポット選択はシード同期のまま＝吸着は各端末の見た目補正のみで同期に影響しない。
+    if (this.roomGlb) {
+      const ray = new THREE.Raycaster();
+      ray.set(new THREE.Vector3(p.x, p.y + 0.6, p.z), new THREE.Vector3(0, -1, 0));
+      const hit = ray
+        .intersectObject(this.roomGlb, true)
+        .find((h: { point: { y: number } }) => h.point.y > p.y - 0.35 && h.point.y < p.y + 0.55);
+      if (hit) clone.position.y += hit.point.y - p.y;
+    }
+    clone.updateMatrixWorld(true);
+    this.scene.add(clone);
+    return clone;
   }
 
   /**
@@ -2352,6 +2374,35 @@ export class TableScene {
         this.camera.updateProjectionMatrix();
       }
       this.wake();
+    };
+    // 検証用（契約29追補）: 候補地 i にテスト用パンダを強制配置し、指定画角（0=正面/1=+50°/2=-50°）で
+    // 同期レンダして JPEG dataURL を返す。preserveDrawingBuffer なしでも同一タスク内の
+    // renderer.render → toDataURL は有効。全候補の干渉（めり込み/浮き）敵対レビュー用。
+    // i=-1 でテスト個体を撤去。通常プレイでは呼ばれない。
+    (el as unknown as { __spotShot?: (i: number, ang?: number) => string | null }).__spotShot = (i, ang = 0) => {
+      if (this.testPlush) {
+        this.scene.remove(this.testPlush);
+        this.testPlush = null;
+      }
+      const p = HIDE_SPOTS[i];
+      const src = this.plushSrc.panda ?? this.plushSrc.dalmatian;
+      if (i < 0 || !p || !src) return null;
+      this.testPlush = this.placeCloneAt(p, src);
+      const headY = this.testPlush.position.y + 1.05 * p.s * 0.5;
+      const toCenter = Math.atan2(-p.x, -p.z) + (ang === 1 ? 0.9 : ang === 2 ? -0.9 : 0);
+      const dist = 2.3;
+      const cx = Math.max(-8.6, Math.min(8.6, p.x + Math.sin(toCenter) * dist));
+      const cz = Math.max(-8.6, Math.min(8.6, p.z + Math.cos(toCenter) * dist));
+      this.camera.position.set(cx, Math.min(headY + 0.9, 5.7), cz);
+      this.camera.lookAt(p.x, headY, p.z);
+      const fovKeep = this.camera.fov;
+      this.camera.fov = 42;
+      this.camera.updateProjectionMatrix();
+      this.renderer.render(this.scene, this.camera);
+      const url = (this.renderer.domElement as HTMLCanvasElement).toDataURL('image/jpeg', 0.55);
+      this.camera.fov = fovKeep;
+      this.camera.updateProjectionMatrix();
+      return url;
     };
     // 検証用（契約26）: かくれんぼの現在配置（[パンダ, ダルメシアン] の順・ワールド座標とスケール）。
     (el as unknown as { __hiddenProbe?: () => unknown }).__hiddenProbe = () =>

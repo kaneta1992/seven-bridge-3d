@@ -132,4 +132,11 @@ export const INSTANCES = [
   { model: 'candleset', x: -7.7, z: -1.95, yaw: 30, snapCap: 0.9 }, // サイドテーブル1
   { model: 'bookstack', x: 8.25, z: -4.75, yaw: -70, snapCap: 0.8, scale: 0.9 }, // サイドテーブル2
   { model: 'candleset', x: 8.5, z: 1.3, yaw: -90, snapCap: 1.0 }, // レコードコンソール
+  // R32追補（2026-08-12 ユーザー要望「1Pの後ろの低い棚にもっと小物を」）: TV台天面を賑やかに +
+  // 各コンソール天面も増強（人形カモフラージュの密度）
+  { model: 'bookstack', x: 1.45, z: -8.25, yaw: 12, snapCap: 1.0, scale: 0.9 }, // TV台（写真立ての手前側）
+  { model: 'candleset', x: 3.6, z: -8.7, yaw: -30, snapCap: 1.0, scale: 0.9 }, // TV台（TVの右奥）
+  { model: 'vaseset', x: 4.0, z: -8.25, yaw: 20, snapCap: 1.0, scale: 0.85 }, // TV台（右端手前）
+  { model: 'photoframes', x: 8.55, z: -0.25, yaw: -95, snapCap: 1.0, scale: 0.9 }, // レコードコンソール左
+  { model: 'miniplant', x: -1.35, z: 8.6, yaw: 150, snapCap: 1.1 }, // サイドボード（花瓶の奥）
 ];

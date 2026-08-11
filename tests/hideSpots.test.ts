@@ -12,9 +12,9 @@ describe('かくれんぼ候補地（契約26）', () => {
     expect(HIDE_SPOTS.length).toBeGreaterThanOrEqual(100);
   });
 
-  it('全候補: スケール0.4以上・部屋(±9)と天井(6.1)内・床(-0.5)以上', () => {
+  it('全候補: スケール0.3以上（棚の中は干渉回避で0.32・2026-08-12ユーザー承認）・部屋内', () => {
     for (const p of HIDE_SPOTS) {
-      expect(p.s).toBeGreaterThanOrEqual(0.4);
+      expect(p.s).toBeGreaterThanOrEqual(0.3);
       expect(p.s).toBeLessThanOrEqual(0.85);
       expect(Math.abs(p.x)).toBeLessThan(9);
       expect(Math.abs(p.z)).toBeLessThan(9);

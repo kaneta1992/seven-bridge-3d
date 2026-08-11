@@ -60,6 +60,7 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 - **スクリーンショットは粒子検証に使えない**: ツール往復ラグ（約2秒）で寿命1〜2秒の粒子は写らない。`__plushProbe('state').particles`（プール生存数）とシェーダ数式のピクセルシミュレーション（ASCII化）で数値検証する
 - **Meshy家具パイプライン（R27/契約25）**: 部屋の家具は `scripts/meshy-room-gen.mjs`（生成・state.jsonで再開可）→ `scripts/merge-furniture.mjs`（1メッシュ/1アトラス統合）→ `public/models/room-furniture.glb`。配置の単一ソースは `scripts/room-layout.mjs`。**Meshy生成モデルは向き・軸がバラバラ**（fixYaw で補正）で、箱物は均等フィットだと最小軸に潰れる（stretch: true で軸別スケール）。部屋を確認するときは `__lookProbe(yawDeg, h?, fov?)`（canvas直付け・卓中央から任意方位を注視）。**レイアウト変更時は hideSpots.ts の家具AABBも更新すること**（merge-report.json から転記）
 - **かくれんぼ同期の設計（R28/契約26）**: 隠れ場所は「候補地カタログ（純計算・全席可視レイ検証込み）× 共有シード（ルームコード#ラウンド）」で全クライアントが独立に同一導出。**可視性検証（＝どのスポットを選ぶか）を実行時レイキャストにしてはいけない**（GLBロード成否で結果が割れて同期ずれする）。検証は `__hiddenProbe`（配置）と scratchpad の hidespots-debug（遮蔽内訳）
+- **かくれんぼ候補地の画像検証パイプライン（R33/契約30）**: `__spotShot(i, ang)`（canvas直付け・候補地iへテスト個体を強制配置→同期render→JPEG dataURL）→ scratchpad の shot-server.mjs(127.0.0.1:9977)へPOST保存 → make-sheets.mjs(sharp)でラベル付きコンタクトシート → scout-opus並列で CLIP/FLOAT/BURIED/EASY 判定。候補地を増減したら必ずこのパイプラインで再検証する。スクショの黒床は浮きに見えやすい（誤FLOAT）ので個別ショットで再確認
 - **接地スナップは同期と無関係（R31/契約29）**: 配置後の「家具GLBへ下向きレイキャストで実サーフェス吸着」は各端末の見た目補正なので実行時レイキャストでもOK（スポット選択に影響しない）。棚段・天面スポットの高さはカタログでは目測±0.35mで書き、スナップに任せる。GLBロード完了時に placeHiddenPlush を再実行する結線を忘れない
 
 ## 通信UX（R9以降）
