@@ -84,6 +84,7 @@ interface Metrics {
   maxSectorFrac: number; // (最大角度偏差 / セクタ半幅 π/n) の最大。<1 なら隣席不可侵
   minMeldGap: number; // 同一行・異メルド隣接カードの接線ギャップの最小（>0 必須）
   minRowGap: number; // 隣接段の半径ギャップの最小（>0 必須。行が1つなら +Inf）
+  maxMeldRows: number; // 1つのメルドが跨る行(u)の最大数（契約18項目4: 必ず1＝行分割禁止）
   scale: number;
   overflow: boolean;
 }
@@ -125,12 +126,23 @@ function analyze(seatCount: number, seatIndex: number, melds: MeldInput[], selfS
     minRowGap = Math.min(minRowGap, rowUs[k - 1]! - rowUs[k]! - 2 * halfH);
   }
 
+  // 各メルドが跨る行(u)数。1 でなければ「同一メルドの行分割」＝契約18項目4 違反。
+  const rowsByMeld = new Map<number, Set<number>>();
+  for (const c of placed) {
+    const set = rowsByMeld.get(c.meldId) ?? new Set<number>();
+    set.add(Math.round(c.u * 1000));
+    rowsByMeld.set(c.meldId, set);
+  }
+  let maxMeldRows = 0;
+  for (const set of rowsByMeld.values()) maxMeldRows = Math.max(maxMeldRows, set.size);
+
   return {
     minPileClear,
     minOriginClear,
     maxSectorFrac,
     minMeldGap,
     minRowGap,
+    maxMeldRows,
     scale: res.scale,
     overflow: res.overflow,
   };
@@ -144,6 +156,7 @@ function expectSafe(m: Metrics, label: string): void {
   expect(m.maxSectorFrac, `${label}: 隣席セクタ内`).toBeLessThan(1);
   if (Number.isFinite(m.minMeldGap)) expect(m.minMeldGap, `${label}: メルド間ギャップ`).toBeGreaterThan(0);
   if (Number.isFinite(m.minRowGap)) expect(m.minRowGap, `${label}: 段間ギャップ`).toBeGreaterThan(0);
+  expect(m.maxMeldRows, `${label}: 同一メルドの行分割禁止（契約18項目4）`).toBe(1);
 }
 
 const melds = (counts: number[]): MeldInput[] => counts.map((count, id) => ({ id, count }));
@@ -187,9 +200,9 @@ describe('メルド配置の幾何検証（契約11 E1）', () => {
     expectSafe(analyze(3, 0, melds([7, 5, 4, 3])), '3人 7+5+4+3');
   });
 
-  it('少数メルドはフルサイズ（scale=1）を保つ', () => {
-    // 中央張り出しの小さい z 方向席（seat0）で1メルドはフルサイズであるべき。
-    expect(analyze(4, 0, melds([3])).scale).toBe(1);
+  it('少数メルドは基準スケール（SCALE_MAX=0.85）を保つ', () => {
+    // 中央張り出しの小さい z 方向席（seat0）で1メルドは基準サイズ（契約18項目5で 1.0→0.85 へ縮小）。
+    expect(analyze(4, 0, melds([3])).scale).toBe(0.85);
   });
 
   it('メルドが増えるほどスケールは単調に縮小（または維持）する', () => {
@@ -198,6 +211,44 @@ describe('メルド配置の幾何検証（契約11 E1）', () => {
       const s = analyze(6, 0, melds(new Array(k).fill(3))).scale;
       expect(s).toBeLessThanOrEqual(prev + 1e-9);
       prev = s;
+    }
+  });
+});
+
+// 同一メルドの行分割禁止（契約18項目4）。ユーザー実プレイ再現: 4人卓の奥席のメルド「K,A,2」に4枚目
+// 「3」を付けたら「K,A,2」と「3」が別行に割れた。付け札後の 4 枚メルドが必ず 1 行になることを数値検証する。
+describe('同一メルドの行分割禁止（契約18項目4）', () => {
+  // メルド meldId の全カードが単一の u（行）に載るか。
+  const meldRows = (n: number, seat: number, ms: MeldInput[], meldId: number, self = false): number =>
+    new Set(
+      place(n, seat, ms, self)
+        .placed.filter((p) => p.meldId === meldId)
+        .map((p) => Math.round(p.u * 1000)),
+    ).size;
+
+  it('再現ケース: 4人卓の奥席（seat1〜3）のメルドに付け札した4枚が1行に収まる', () => {
+    // 付け札で 3→4 枚に伸びた単一メルド。全席（奥席含む）で 1 行のまま。
+    for (let seat = 0; seat < 4; seat++) {
+      expect(meldRows(4, seat, melds([4]), 0), `4p seat${seat} 単4枚メルド`).toBe(1);
+      // 他メルドと混在（付け札されたメルド＋別の3枚メルド）でも各メルドは 1 行。
+      expect(meldRows(4, seat, melds([4, 3]), 0), `4p seat${seat} 混在の4枚メルド`).toBe(1);
+      expect(meldRows(4, seat, melds([4, 3]), 1), `4p seat${seat} 混在の3枚メルド`).toBe(1);
+    }
+  });
+
+  it('あらゆる人数×席×メルド構成で各メルドは常に1行（自席・非自席とも）', () => {
+    const patterns = [[4], [4, 3], [5], [7], [13], [13, 4], [3, 3, 3], [7, 5, 4, 3], [1, 1, 1]];
+    for (let n = 2; n <= 6; n++) {
+      for (let seat = 0; seat < n; seat++) {
+        for (const pat of patterns) {
+          for (const self of [false, true]) {
+            const ms = melds(pat);
+            for (let id = 0; id < pat.length; id++) {
+              expect(meldRows(n, seat, ms, id, self), `n=${n} seat=${seat} [${pat}] meld${id} self=${self}`).toBe(1);
+            }
+          }
+        }
+      }
     }
   });
 });
@@ -248,10 +299,13 @@ describe('自席メルドの可視域配置（契約12 項目1a）', () => {
       );
   });
 
-  it('多メルド/混雑席でも段数最小化が効く（自席は非自席より確実に内側へ寄る）', () => {
+  it('段数最小化が効くケースは自席が非自席より確実に内側へ寄る（縮小で内側クラスタ）', () => {
+    // 内側 1 段にまとめられるケースは自席が縮小して内寄せ＝厳密に内側。
     expect(selfMaxU(4, 0, melds([3, 3]))).toBeLessThan(nonMaxU(4, 0, melds([3, 3])));
     expect(selfMaxU(6, 0, melds([3]))).toBeLessThan(nonMaxU(6, 0, melds([3])));
     expect(selfMaxU(6, 1, melds([3]))).toBeLessThan(nonMaxU(6, 1, melds([3])));
-    expect(selfMaxU(6, 1, melds([3, 3, 3]))).toBeLessThan(nonMaxU(6, 1, melds([3, 3, 3])));
+    // 6人狭セクタで [3,3,3] は分割禁止（項目4）のため最小 2 段が限界＝自席でも非自席と同等（内側以下）。
+    // no-split 導入前は分割で更に詰められたが、分割禁止が優先される（自席が非自席を上回らないことは保証）。
+    expect(selfMaxU(6, 1, melds([3, 3, 3]))).toBeLessThanOrEqual(nonMaxU(6, 1, melds([3, 3, 3])) + 1e-9);
   });
 });

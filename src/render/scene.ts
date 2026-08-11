@@ -34,8 +34,11 @@ const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓�
 // ドラッグ/スワイプでヨー・ピッチ（見回し）、ピンチ/ホイールでズーム（FOV）を操作する。
 // オービット（卓中心を軸に回り込む）は廃止した。回り込みが物理的に無くなるため他家手札の遮蔽
 // フェード（updateHandOcclusion）は不要化した（E5）。
-const EYE_BACK = 1.6; // 自席（SEAT_R）からさらに外側へ引いた目線の水平位置（卓の縁越しに見渡す）
-const EYE_HEIGHT = 1.85; // 着席した目線の高さ（卓面 y=0 の上）
+// 既定視点（契約18項目2）: R17以前の「卓全体が見える俯瞰寄りの構図」へ戻す。首振り化で目線が
+// 下がり卓が見づらくなったため、目線を旧カメラ位置相当（水平距離~6.25・高さ~4.3・注視=卓中央で
+// 俯角~34°、旧 camPos(0,4,6) と同等）まで引き上げ、そこを基点に首振りする。
+const EYE_BACK = 3.7; // 自席（SEAT_R=2.55）からさらに外側へ引いた目線の水平位置（合計~6.25＝旧z相当）
+const EYE_HEIGHT = 4.3; // 目線の高さ（卓面 y=0 の上・旧カメラ高さ相当。卓全体を俯瞰できる）
 const MIN_PITCH = -1.3; // 見下ろし限界（卓面直下まで・カードが裏返らない約 -74°）
 const MAX_PITCH = 0.66; // 見上げ限界（天井まで・真上で反転しない約 +38°）
 const MIN_FOV = 32; // ズームイン限界（望遠寄り）
@@ -203,9 +206,10 @@ export class TableScene {
       tex: THREE.CanvasTexture;
       mat: THREE.SpriteMaterial;
       key: string;
-      basePos: THREE.Vector3; // クランプ前の基準位置（縦画面の画面内収納に使う・項目4）
+      basePos: THREE.Vector3; // 席のワールド基準位置（クランプ撤去・契約18項目3。視界外は自然に見切れる）
       opacity: number; // 現在の可視不透明度（Q8: 表示切替・手番強調をクロスフェード）
       opacityTarget: number; // 目標（表示=1 / 非表示=0）
+      behind: boolean; // カメラ背面にある（背面投影で正面へ化けるため強制非表示・契約18項目3）
     }
   >();
 
@@ -856,7 +860,7 @@ export class TableScene {
         orderedById.set(m.id, cards);
         return { id: m.id, count: cards.length };
       });
-      // 自席（viewYou）は「手札帯より上」へ寄せる自席専用レイアウト（控えめバルジ+段数最小化・項目1a）。
+      // メルド配置（契約18項目4: 同一メルドは1行・収まらなければ縮小）。自席は付け札のため内側バンドへ寄せる。
       const layout = layoutSeatMelds(this.seatCount, dir.x, inputs, seat === this.viewYou);
       const halfW = (Math.max(CARD_W, CARD_H) / 2) * layout.scale;
       // 公開/付け札で新規に現れるメルドカードは、所有者席の手（自席=2D手札位置 / 他家=空中手札）から
@@ -1323,7 +1327,7 @@ export class TableScene {
         const sprite = new THREE.Sprite(mat);
         sprite.renderOrder = 60;
         this.scene.add(sprite);
-        L = { sprite, tex, mat, key, basePos: new THREE.Vector3(), opacity: 0, opacityTarget: 1 };
+        L = { sprite, tex, mat, key, basePos: new THREE.Vector3(), opacity: 0, opacityTarget: 1, behind: false };
         this.labels.set(seat.index, L);
       } else if (L.key !== key) {
         // 手番強調（金枠）や名前変更はテクスチャ差替。opacity を一度沈めてから戻し、クロスフェードにする（Q8）。
@@ -1341,7 +1345,8 @@ export class TableScene {
         continue;
       }
       const dir = this.seatDir(seat.index);
-      // 縦画面は視野が狭く上端で見切れやすいので、半径・高さを控えめにする（項目4）。
+      // 席の外周やや上へ据える（縦画面は視野が狭いので半径・高さを控えめに）。クランプは撤去済み＝
+      // 視界外のラベルは画面外へ自然に見切れ、背面のラベルは updateLabelFacing で非表示になる（項目3）。
       L.basePos.copy(dir).multiplyScalar(SEAT_R * (portrait ? 1.0 : 1.12));
       L.basePos.y = TABLE_TOP_Y + (portrait ? 0.58 : 0.72);
       L.sprite.position.copy(L.basePos);
@@ -1351,7 +1356,7 @@ export class TableScene {
     }
     // 席数が減った場合（次ゲームの人数変更等）は余ったラベルをフェードアウト。
     for (const [idx, L] of this.labels) if (idx >= n) L.opacityTarget = 0;
-    this.clampLabels();
+    this.updateLabelFacing();
   }
 
   /** 席名ラベルの不透明度を目標へ追従させる（Q8: 表示切替・手番強調のクロスフェード）。loop から毎フレーム。 */
@@ -1359,57 +1364,41 @@ export class TableScene {
     let busy = false;
     const ko = Math.min(1, k * 1.4);
     for (const L of this.labels.values()) {
-      if (Math.abs(L.opacity - L.opacityTarget) > 0.004) {
-        L.opacity += (L.opacityTarget - L.opacity) * ko;
+      // カメラ背面のラベルは即 0 へ（背面投影で正面に化けるのを防ぐため target を落とす・契約18項目3）。
+      const target = L.behind ? 0 : L.opacityTarget;
+      if (Math.abs(L.opacity - target) > 0.004) {
+        L.opacity += (target - L.opacity) * ko;
         busy = true;
       } else {
-        L.opacity = L.opacityTarget;
+        L.opacity = target;
       }
       L.mat.opacity = L.opacity;
-      L.sprite.visible = L.opacity > 0.01;
+      // 背面のラベルはフェード途中でも描画しない（depthTest=false のスプライトは背面でも最前面に
+      // 投影され得るため、可視性はフェードでなく前後判定で確実に切る・契約18項目3）。
+      L.sprite.visible = L.opacity > 0.01 && !L.behind;
     }
     return busy;
   }
 
   /**
-   * 席名ラベルを画面内に収める（項目2・4）。基準位置を投影し、上下端を超える分は
-   * ワールド Y を上下させ、左右端（|NDC.x|>SIDE）を超える分はカメラ右方向（水平面）へ
-   * 押し戻す。縦画面で左右席のラベルがはみ出す問題（R7 の上端クランプだけでは不足）を解消する。
-   * 端に寄せることで席の左右方向は保たれるため、どの席のラベルかは判別できる。
-   * カメラのイージング追従（およびユーザーのオービット）に合わせて毎フレーム呼ぶ。
+   * 席名ラベルを基準位置へ戻し、カメラ前方/背面を判定する（契約18項目3: 画面端クランプ廃止）。
+   * クランプ（画面内へ引き戻す処理）は撤去し、視界外のラベルは投影で自然に画面外へ見切れさせる。
+   * 唯一の対処は「背面投影」: カメラの後ろにあるラベルは project() で符号が反転し正面へ巨大に化ける
+   * ため、視線前方ベクトルとの内積で背面判定し、背面なら非表示にする（stepLabelFades が visible を切る）。
+   * カメラのイージング追従に合わせて毎フレーム呼ぶ。
    */
-  private clampLabels(): void {
-    const TOP = 0.9; // NDC 上端マージン（1.0=画面端）
-    const BOT = -0.92; // NDC 下端マージン
-    const SIDE = 0.94; // NDC 左右端マージン（|x|>SIDE で内側へ引き戻す）
-    const STEP = 0.25; // 投影勾配を推定するプローブ量（ワールド単位）
+  private updateLabelFacing(): void {
     this.camera.updateMatrixWorld();
-    // カメラ右ベクトル（水平面成分）。ラベルを画面水平方向へ押し戻すための移動軸。
-    const right = TMP_R.setFromMatrixColumn(this.camera.matrixWorld, 0);
-    right.y = 0;
-    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
-    right.normalize();
+    // カメラ視線前方（-Z 列の逆）と現在のカメラ位置。ラベルが前方半空間にあるかで表示可否を決める。
+    const fwd = TMP_R.setFromMatrixColumn(this.camera.matrixWorld, 2).negate();
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    fwd.normalize();
+    const camPos = this.camera.position;
     for (const L of this.labels.values()) {
-      if (!L.sprite.visible) continue;
-      L.sprite.position.copy(L.basePos);
-      // 縦方向: 上端超過は下げ、下端超過は上げる（プローブで勾配を線形推定）。
-      let p = TMP_A.copy(L.sprite.position).project(this.camera);
-      if (p.y > TOP || p.y < BOT) {
-        const target = p.y > TOP ? TOP : BOT;
-        const p2 = TMP_B.copy(L.sprite.position).setY(L.sprite.position.y - STEP).project(this.camera);
-        const slope = (p.y - p2.y) / STEP; // dNDC.y / dWorldY
-        if (Math.abs(slope) > 1e-3) L.sprite.position.y += (target - p.y) / slope;
-      }
-      // 横方向: 左右端超過はカメラ右方向へ押し戻す（縦補正後の位置で再投影）。
-      p = TMP_A.copy(L.sprite.position).project(this.camera);
-      if (Math.abs(p.x) > SIDE) {
-        const p3 = TMP_B.copy(L.sprite.position).addScaledVector(right, STEP).project(this.camera);
-        const slope = (p3.x - p.x) / STEP; // dNDC.x / d(along right)
-        if (Math.abs(slope) > 1e-4) {
-          const targetX = Math.sign(p.x) * SIDE;
-          L.sprite.position.addScaledVector(right, (targetX - p.x) / slope);
-        }
-      }
+      L.sprite.position.copy(L.basePos); // クランプしない＝そのまま投影（画面外は自然に見切れる）
+      const toLabel = TMP_A.subVectors(L.basePos, camPos);
+      // 前方成分が僅少以下（真横〜背面）は背面投影の危険域とみなし隠す（正面化けを根絶）。
+      L.behind = toLabel.dot(fwd) <= 0.05;
     }
   }
 
@@ -1634,10 +1623,9 @@ export class TableScene {
   private aimCameraAt(seatIndex: number): void {
     const eye = this.eyeFor(seatIndex);
     this.camPosGoal.copy(eye);
-    // 既定の見回し角: 自席の目線から卓中央（やや先の卓上）を見下ろす。
-    const dir = this.seatDir(seatIndex);
-    const lookAt = TMP_A.copy(dir).multiplyScalar(-0.6);
-    lookAt.y = -0.05;
+    // 既定の見回し角: 俯瞰寄りの目線から卓中央（原点）を見下ろす＝卓全体が入る構図（契約18項目2）。
+    // 視点リセット・ホットシート手番リセットも aimCameraAt 経由なので同じ画角に戻る（E1）。
+    const lookAt = TMP_A.set(0, 0, 0);
     const d = TMP_B.copy(lookAt).sub(eye);
     this.lookYaw = Math.atan2(d.z, d.x);
     this.lookPitch = clamp(Math.atan2(d.y, Math.hypot(d.x, d.z)), MIN_PITCH, MAX_PITCH);
@@ -1655,7 +1643,8 @@ export class TableScene {
 
   /** 画面の縦横に応じた既定画角（縦画面は視野が狭いので広角側）。aimCameraAt と resize で共有する。 */
   private orientationFov(): number {
-    return this.aspect() < 1 ? 60 : 46;
+    // 縦画面は横視野が狭く卓の左右が切れやすいので広角側に振る（俯瞰基点でも縦は構造的に一部見切れる）。
+    return this.aspect() < 1 ? 62 : 46;
   }
 
   // ---- ユーザーカメラ操作（契約07項目1: ピンチズーム / スワイプ軌道回転） --------
@@ -1665,12 +1654,14 @@ export class TableScene {
     const el = this.renderer.domElement as HTMLElement;
     el.style.touchAction = 'none'; // ピンチでページ全体がズームしないように（E5）
 
-    // 首振り（契約17項目7）: ドラッグでヨー・ピッチを回す。指を動かした向きに視界がついてくる
-    // （右ドラッグ=右を見る / 下ドラッグ=下を見る）ミラー操作。視点位置は自席に固定。
+    // 首振り（契約18項目1: 方向反転）: ドラッグで「画面（世界）を掴んで動かす」感覚に合わせる。
+    // 指を右へ動かすと世界が右へ流れる＝視線は左を向く。指を下へ動かすと世界が下へ流れる＝視線は
+    // 上を向く。従来（指の向きへ視線が追従）は直感と逆だったため、ヨー・ピッチの符号を反転する。
+    // モバイルFPS/地図パンの慣習と一致。ピッチ制限（MIN/MAX_PITCH）は反転後も同じくクランプで効く（E4）。
     const lookFromDelta = (dx: number, dy: number): void => {
       this.ensureUserControl();
-      this.lookYaw += dx * LOOK_YAW_SENS;
-      this.lookPitch = clamp(this.lookPitch - dy * LOOK_PITCH_SENS, MIN_PITCH, MAX_PITCH);
+      this.lookYaw -= dx * LOOK_YAW_SENS;
+      this.lookPitch = clamp(this.lookPitch + dy * LOOK_PITCH_SENS, MIN_PITCH, MAX_PITCH);
       this.applyLook();
     };
     // ズーム（契約17項目7）: ピンチ/ホイールで画角を増減（factor<1 で寄り＝FOV縮小）。
@@ -1769,11 +1760,13 @@ export class TableScene {
       this.camera.position.copy(this.camPos);
       this.camera.lookAt(this.camTarget);
       this.camera.updateMatrixWorld();
-      this.clampLabels();
-      const labels: { index: number; visible: boolean; ndc: number[] }[] = [];
+      this.updateLabelFacing();
+      const labels: { index: number; visible: boolean; behind: boolean; ndc: number[] }[] = [];
       for (const [index, L] of this.labels) {
         const n = TMP_A.copy(L.sprite.position).project(this.camera);
-        labels.push({ index, visible: !!L.sprite.visible, ndc: [n.x, n.y] });
+        // 定常表示可否: 背面でなく表示対象（opacityTarget>0.5）。背面は投影が化けるため必ず不可視。
+        const visible = !L.behind && L.opacityTarget > 0.5;
+        labels.push({ index, visible, behind: L.behind, ndc: [n.x, n.y] });
       }
       return {
         pos: this.camera.position.toArray(),
@@ -1955,8 +1948,8 @@ export class TableScene {
     this.spot.target.position.copy(this.spotTarget);
     this.spot.target.updateMatrixWorld?.();
 
-    // 席名ラベルの画面内クランプ（カメラのイージングに追従・項目4）+ 不透明度クロスフェード（Q8）
-    this.clampLabels();
+    // 席名ラベルの前後判定（カメラのイージングに追従・背面は隠す・項目3）+ 不透明度クロスフェード（Q8）
+    this.updateLabelFacing();
     if (this.stepLabelFades(k)) fxBusy = true;
     // カメラが手前に回り込んだ他家の空中手札を隠す（契約14項目4）。カメラのイージングに毎フレーム追従。
     this.updateHandOcclusion();
@@ -2218,8 +2211,8 @@ export class TableScene {
 }
 
 const TMP_A = new THREE.Vector3(); // ループ内の一時ベクトル（毎フレームの new を避ける）
-const TMP_B = new THREE.Vector3(); // clampLabels の投影勾配推定用
-const TMP_R = new THREE.Vector3(); // clampLabels のカメラ右ベクトル（水平押し戻し軸）
+const TMP_B = new THREE.Vector3(); // 補間・投影の一時ベクトル
+const TMP_R = new THREE.Vector3(); // updateLabelFacing のカメラ視線前方ベクトル（背面判定軸）
 const TMP_HIT = new THREE.Vector3(); // dropTargetAt の交点用（ポインタ処理とループは同時実行されない）
 
 /** 値を [lo, hi] に丸める（オービットのズーム/仰角クランプ用）。 */
