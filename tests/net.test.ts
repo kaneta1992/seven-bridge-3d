@@ -372,6 +372,59 @@ describe('NetSession 統合（インメモリ・トランスポート）', () =>
     hostS.dispose();
     g1S.dispose();
   });
+
+  it('遅延参加: ゲストが先に待機し、ホストが後から現れると参加が成立する（モバイルURL共有・契約22項目2）', async () => {
+    const hub = new MockHub();
+    // ゲストが先に部屋へ入る（ホストは共有URL送信中でまだ不在＝バックグラウンド相当）。
+    const g1T = hub.create('g1Peer');
+    let joined = false;
+    let err = '';
+    const g1S = NetSession.guest('ABC241', 'g1', 'G1', g1T, null, 'tokG1', { intervalMs: 5, maxMs: 5000 });
+    g1S.on('roster', () => (joined = true));
+    g1S.on('error', (m) => (err = m));
+
+    await settle();
+    expect(joined).toBe(false); // ホスト不在では参加できないが、エラーにもしない（待機継続）
+    expect(err).toBe('');
+
+    // ホストが後から現れる（共有シート/バックグラウンドからの復帰相当）。
+    const hostT = hub.create('hostPeer');
+    const hostS = NetSession.host('ABC241', 'h', 'H', hostT, { maxPlayers: 4, totalRounds: 1 });
+    await settle();
+    expect(joined).toBe(true); // ホスト出現の瞬間に名簿を受信＝遅延参加が成立
+    expect(err).toBe('');
+
+    hostS.dispose();
+    g1S.dispose();
+  });
+
+  it('リトライ待機: ホスト不在でも Hello を再送しつつ待ち、最大待機を超えて初めてエラー（15秒一発ではない・契約22項目2）', async () => {
+    const hub = new MockHub();
+    const g1T = hub.create('g1Peer');
+    // Hello を観測する受け身のピア（ホストではない＝roster/start を送らないので latch されない）。
+    const spyT = hub.create('spyPeer');
+    const [, onHello] = spyT.makeAction<HelloMsg>(NS.hello);
+    let hellos = 0;
+    onHello(() => hellos++);
+
+    let err = '';
+    // maxMs は settle() が消費する実時間より十分大きく取る（wall-clock 基準の締切のため）。
+    const g1S = NetSession.guest('ABC242', 'g1', 'G1', g1T, null, 'tokG1', { intervalMs: 8, maxMs: 1000 });
+    g1S.on('error', (m) => (err = m));
+
+    // 初期 Hello + 複数回の再送が観測ピアへ届く（待機を継続している証拠）。締切前なのでエラーは出ない。
+    await new Promise((r) => setTimeout(r, 80));
+    await settle(6);
+    expect(hellos).toBeGreaterThanOrEqual(2);
+    expect(err).toBe(''); // まだ待機中（旧15秒一発では諦めていた）
+
+    // 最大待機（1000ms）を超えると最終エラー（ルーム不在/誤コードの最終文言）。
+    await new Promise((r) => setTimeout(r, 1050));
+    await settle(6);
+    expect(err).toContain('ホスト');
+
+    g1S.dispose();
+  });
 });
 
 describe('LobbyLink 公開ロビー（固定チャネル広告）', () => {

@@ -98,8 +98,8 @@ export class TableScene {
   private bodyMat: THREE.MeshStandardMaterial;
   private backMat: THREE.MeshStandardMaterial;
   private frontMatCache = new Map<string, THREE.MeshStandardMaterial>();
-  // デモ手札公開の裏面用「表絵柄（U反転）」材質キャッシュ（契約20項目2・cardId キー・最大52枚で有界）。
-  private demoBackMatCache = new Map<string, THREE.MeshStandardMaterial>();
+  // （契約22項目1で撤去）デモ手札の両面表は廃止。外側＝裏面デザインの通常カードに戻したため、
+  //   反転表絵柄の材質キャッシュ（demoBackMatCache）は不要になった。
   private raycaster = new THREE.Raycaster(); // 3D メルドの当たり判定（付け札D&D・R4項目5）
 
   // 既知カード（面が判明: 自手札/捨て札/メルド）を cardId で管理
@@ -748,35 +748,7 @@ export class TableScene {
     return m;
   }
 
-  /**
-   * デモ手札公開（契約20項目2）用: 札の裏面(-z)に貼る「表絵柄」材質。-z 面は Y軸180°回転で置かれ、その
-   * ままでは絵柄が左右反転して見えるため、テクスチャの U を反転（repeat.x=-1）して非反転で読める向きに
-   * する。cardId でキャッシュ（frontMatCache と同パターン・最大52枚で有界）。反転テクスチャは共有module
-   * テクスチャではないので dispose で map も明示解放する。
-   */
-  private demoBackFaceMat(card: Card): THREE.MeshStandardMaterial {
-    const key = cardId(card);
-    let m = this.demoBackMatCache.get(key);
-    if (!m) {
-      const tex = faceTexture(card).clone();
-      tex.wrapS = THREE.RepeatWrapping;
-      tex.repeat.x = -1;
-      tex.offset.x = 1;
-      tex.needsUpdate = true;
-      m = new THREE.MeshPhysicalMaterial({
-        map: tex,
-        roughness: 0.42,
-        metalness: 0.02,
-        clearcoat: 0.55,
-        clearcoatRoughness: 0.25,
-        envMapIntensity: 0.4,
-      });
-      this.demoBackMatCache.set(key, m);
-    }
-    return m;
-  }
-
-  private buildCard(card: Card | null, faceBoth = false): THREE.Group {
+  private buildCard(card: Card | null): THREE.Group {
     const g = new THREE.Group();
     // 材質はカードごとに複製する（opacity を個別に動かすため・Q5/Q6/U3）。マップ（テクスチャ）は
     // クローンでも参照共有されるので重い資源は増えない。transparent=true / depthWrite=true 固定で、
@@ -795,9 +767,9 @@ export class TableScene {
     body.receiveShadow = true;
     g.add(body);
 
-    // 裏面: 通常は裏絵柄。デモ公開（faceBoth）では表絵柄（U反転で非反転）を貼り、卓のどの側からも
-    // 実絵柄が表向きに見える（契約20項目2）。単面カードでは1カメラから全席を表向きにできないための措置。
-    const back = new THREE.Mesh(this.planeGeo, prep(faceBoth && card ? this.demoBackFaceMat(card) : this.backMat));
+    // 裏面(-z)は常に裏デザイン（契約22項目1）。デモの手札もこれで「外側＝裏面／持ち主側＝表」の通常カード
+    // になり、実対局と同じ見え方（他プレイヤー・カメラ側は裏）に戻る。両面表（旧 faceBoth）は撤去した。
+    const back = new THREE.Mesh(this.planeGeo, prep(this.backMat));
     back.rotation.y = Math.PI;
     back.position.z = -(CARD_D / 2 + 0.006); // 本体面から十分に離し共面を避ける
     g.add(back);
@@ -1586,10 +1558,11 @@ export class TableScene {
   private stepLabelFades(k: number, dt: number): boolean {
     let busy = false;
     const ko = Math.min(1, k * 1.4);
-    // 手番色ワイプは「時間基準」で一定速度に進める（左→右へ約 0.55s で塗り切る＝はっきり読める 2 色ワイプ）。
-    // exp イージング係数 k で進めると数フレームで終わり瞬間切替に見えるため dt で線形に進める（実測是正）。
-    // reduced-motion（quality.cameraShake=false）では即座に切り替える（E6・派手な走査を控える）。
-    const WIPE_DUR = 0.55;
+    // 手番色ワイプは「時間基準」で phase を一定速度に進める（0→1 を約 0.64s＝白→金の二段で塗り切る）。
+    // phase は線形に進め、二段のきびきびイージング（easeOutCubic）は makeLabelTexture 側で edge にかける
+    // ので、中断→再開（鳴きの高速手番ジャンプで phaseTarget が張り替わっても）phase の連続性だけで破綻なく
+    // 追従する（契約22項目3）。reduced-motion（quality.cameraShake=false）では即座に確定する（E3）。
+    const WIPE_DUR = 0.64;
     const step = this.quality.cameraShake ? Math.min(1, dt / WIPE_DUR) : 1;
     for (const L of this.labels.values()) {
       // 手番色ワイプ: phase を phaseTarget へ一定速度で寄せ、変化があればテクスチャを描き直す。
@@ -1643,11 +1616,13 @@ export class TableScene {
   }
 
   /**
-   * 席名ラベルのテクスチャを生成する。phase（0..1・契約21項目7）で手番色の 2 色ワイプを描く:
+   * 席名ラベルのテクスチャを生成する。phase（0..1・契約21項目7 / 契約22項目3で二段化）で手番色の
+   * ワイプを描く。二段構え＋きびきびイージング（easeOutCubic）で、手番の獲得が「読める」演出になる:
    *  - phase=0: 非手番（暗紺プレート・淡色文字）。phase=1: 手番（金プレート・墨文字）。
-   *  - 0<phase<1: 手番の金プレートを左→右にワイプで塗り進め（clip 幅 = W*phase）、その先端に
-   *    「1色目」= 生成り（paper）の細い走査帯を置く。金が塗り切った所は手番の文字色、まだの所は
-   *    非手番の文字色で読めるよう、領域ごとに clip して二重描画する（どの進捗でも可読・NieR 風の抑制的演出）。
+   *  - 段1 [phase 0→0.5]: 白（生成り）が左→右へ伸び切る（whiteEdge が 0→全幅）。
+   *  - 段2 [phase 0.5→1]: 金が同様に左→右へ追いかけ（goldEdge が 0→全幅）完成する。
+   *  常に goldEdge <= whiteEdge。領域ごとに clip して「金→白→紺」の順で三層を描くので、どの進捗でも
+   *  名前・失点が読める（白帯上は墨文字・紺地は淡色文字）。逆再生（手番喪失）は金→白の順で引く。
    */
   private makeLabelTexture(name: string, score: number, phase = 0): THREE.CanvasTexture {
     const W = 256;
@@ -1662,54 +1637,66 @@ export class TableScene {
     const fam = 'system-ui, "Hiragino Kaku Gothic ProN", sans-serif';
     const scoreStr = String(score);
 
-    // 1 枚のプレートを描くヘルパ（cur=手番の金配色か）。text 色は cur で切替。
-    const drawPlate = (cur: boolean): void => {
+    // 1 枚のプレートを描くヘルパ。mode=配色（idle=非手番紺 / white=先導する生成り帯 / gold=手番金）。
+    const drawPlate = (mode: 'idle' | 'white' | 'gold'): void => {
       roundRectPath(ctx, pad, pad, W - 2 * pad, H - 2 * pad, r);
-      ctx.fillStyle = cur ? 'rgba(216,161,58,0.94)' : 'rgba(14,22,33,0.86)';
+      ctx.fillStyle = mode === 'gold' ? 'rgba(216,161,58,0.94)' : mode === 'white' ? 'rgba(244,239,226,0.96)' : 'rgba(14,22,33,0.86)';
       ctx.fill();
       ctx.lineWidth = 3;
-      ctx.strokeStyle = cur ? 'rgba(255,236,170,0.98)' : 'rgba(120,160,210,0.55)';
+      ctx.strokeStyle = mode === 'gold' ? 'rgba(255,236,170,0.98)' : mode === 'white' ? 'rgba(255,252,244,0.98)' : 'rgba(120,160,210,0.55)';
       ctx.stroke();
+      // 文字色: 金/白の明プレートは墨文字、紺の暗プレートは淡色文字（どの層でも可読）。
+      const dark = mode !== 'idle';
       ctx.textBaseline = 'middle';
       // 右: 累計失点。
       ctx.textAlign = 'right';
       ctx.font = `700 30px ${fam}`;
       const scoreW = ctx.measureText(scoreStr).width;
-      ctx.fillStyle = cur ? '#3a2a06' : '#ffd873';
+      ctx.fillStyle = dark ? '#3a2a06' : '#ffd873';
       ctx.fillText(scoreStr, W - pad - 12, H / 2 + 1);
       // 区切り中黒。
-      ctx.fillStyle = cur ? 'rgba(32,22,3,0.6)' : 'rgba(200,214,235,0.5)';
+      ctx.fillStyle = dark ? 'rgba(32,22,3,0.6)' : 'rgba(200,214,235,0.5)';
       ctx.font = `700 26px ${fam}`;
       const sepX = W - pad - 18 - scoreW;
       ctx.fillText('·', sepX, H / 2);
       // 左: 名前（区切り手前まで省略）。
       ctx.textAlign = 'left';
       ctx.font = `700 34px ${fam}`;
-      ctx.fillStyle = cur ? '#201603' : '#eef3fa';
+      ctx.fillStyle = mode === 'gold' ? '#201603' : mode === 'white' ? '#2a2114' : '#eef3fa';
       ctx.fillText(ellipsize(ctx, name || '?', sepX - (pad + 16)), pad + 14, H / 2 + 1);
     };
-
-    if (phase <= 0.001) {
-      drawPlate(false);
-    } else if (phase >= 0.999) {
-      drawPlate(true);
-    } else {
-      // 非手番プレートを土台に描き、左→右のワイプ幅 edge までを手番プレートで上書き（clip）。
-      drawPlate(false);
-      const edge = pad + (W - 2 * pad) * phase;
+    // 指定領域だけを clip してプレートを描く小ヘルパ（左端 0..edge を上書き）。
+    const drawClipped = (mode: 'idle' | 'white' | 'gold', edge: number): void => {
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, 0, edge, H);
       ctx.clip();
-      drawPlate(true);
+      drawPlate(mode);
       ctx.restore();
-      // 先端の「1色目」= 生成りの細い走査帯（金の到達点を先導する上品な光の線）。
+    };
+
+    if (phase <= 0.001) {
+      drawPlate('idle');
+    } else if (phase >= 0.999) {
+      drawPlate('gold');
+    } else {
+      // 二段の各進捗（easeOutCubic できびきび立ち上げる）。段1=白の先端、段2=金の先端。
+      const inner = W - 2 * pad;
+      const whiteP = easeOutCubic(clamp(phase * 2, 0, 1)); // 0..0.5 で 0→1
+      const goldP = easeOutCubic(clamp(phase * 2 - 1, 0, 1)); // 0.5..1 で 0→1（常に <= whiteP）
+      const whiteEdge = pad + inner * whiteP;
+      const goldEdge = pad + inner * goldP;
+      drawPlate('idle'); // 土台（紺）
+      drawClipped('white', whiteEdge); // 段1: 白が先導
+      if (goldP > 0.001) drawClipped('gold', goldEdge); // 段2: 金が追走
+      // 現在動いている先端に細い光走査帯を置く（金が動いていれば金先端、まだ白段なら白先端）。
+      const moving = goldP > 0 && goldP < 1 ? goldEdge : whiteEdge;
       const bandW = 10;
-      const grad = ctx.createLinearGradient(edge - bandW, 0, edge + 2, 0);
-      grad.addColorStop(0, 'rgba(233,228,214,0)');
-      grad.addColorStop(1, 'rgba(245,240,224,0.92)');
+      const grad = ctx.createLinearGradient(moving - bandW, 0, moving + 2, 0);
+      grad.addColorStop(0, 'rgba(255,250,236,0)');
+      grad.addColorStop(1, 'rgba(255,250,236,0.95)');
       ctx.fillStyle = grad;
-      ctx.fillRect(edge - bandW, pad, bandW + 2, H - 2 * pad);
+      ctx.fillRect(moving - bandW, pad, bandW + 2, H - 2 * pad);
     }
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
@@ -1728,12 +1715,14 @@ export class TableScene {
   private syncBacks(view: PlayerView, now: number, dealing: boolean, deckPos: THREE.Vector3): void {
     const desired = new Map<
       string,
-      { pos: THREE.Vector3; quat: THREE.Quaternion; fromDeck: boolean; delay: number; card?: Card | null; faceBoth?: boolean }
+      { pos: THREE.Vector3; quat: THREE.Quaternion; fromDeck: boolean; delay: number; card?: Card | null }
     >();
     let dealIdx = 0;
     const reveal = this.demoHands;
     if (reveal) {
-      // デモ公開モード（契約20項目2）: 自席を含む全席の実手札を表向きで浮かべる。カードごとに
+      // デモ公開モード（契約20項目2・契約22項目1で片面化）: 全席の実手札を「通常カード」で浮かべる。
+      // 表(+z)＝実絵柄が持ち主側へ向き、外側（他プレイヤー/カメラ側）は裏面デザイン。カメラが持ち主側から
+      // 舐めるカットで表が覗く自然な演出になり、実対局の見え方（外側は裏）とも一致する。カードごとに
       // 安定キー（h:席:cardId）で管理し、手札が変わっても正しい絵柄で作り直される（裏向きモードは
       // スロット番号キーだが、両モードは同一シーンで併用しないためキー空間は衝突しない）。
       for (const seat of view.seats) {
@@ -1751,11 +1740,10 @@ export class TableScene {
           const drawFly = isDraw && !this.backById.has(key);
           desired.set(key, {
             pos: s.pos,
-            quat: s.quat, // 浮遊扇の自然な向きのまま。両面に絵柄を貼る（faceBoth）ので卓のどの側からも表向きに見える
+            quat: s.quat, // 浮遊扇の自然な向き。表(+z)が持ち主側、裏面が外側を向く通常カード（契約22項目1）
             fromDeck: dealing || drawFly,
             delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
             card: c,
-            faceBoth: true,
           });
         });
         this.backSeatCount.set(seat.index, cards.length);
@@ -1801,7 +1789,7 @@ export class TableScene {
     for (const [key, t] of desired) {
       const obj = this.backById.get(key);
       if (!obj) {
-        const group = this.buildCard(t.card ?? null, t.faceBoth ?? false); // デモ公開時は実絵柄（両面）、通常は裏向き
+        const group = this.buildCard(t.card ?? null); // デモ公開時は実絵柄（表=持ち主側）、通常は裏向き（card=null）
         const spawn = t.fromDeck ? deckPos : t.pos;
         group.position.copy(spawn);
         group.quaternion.copy(t.quat);
@@ -2543,12 +2531,6 @@ export class TableScene {
     this.backMat.dispose?.();
     for (const m of this.frontMatCache.values()) m.dispose?.();
     this.frontMatCache.clear();
-    // デモ裏面材質は反転テクスチャ（共有module外）を持つので map も明示解放する（E6準拠）。
-    for (const m of this.demoBackMatCache.values()) {
-      m.map?.dispose?.();
-      m.dispose?.();
-    }
-    this.demoBackMatCache.clear();
     // モジュールキャッシュのテクスチャを破棄しクリア（次シーンで再生成される）
     disposeCardTextures();
     disposeFelt();
@@ -2572,6 +2554,12 @@ const TMP_HIT = new THREE.Vector3(); // dropTargetAt の交点用（ポインタ
 /** 値を [lo, hi] に丸める（オービットのズーム/仰角クランプ用）。 */
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** きびきびした立ち上がり（手番ワイプ二段の各段に使用・契約22項目3）。t:0→1 で 0→1・終端で減速。 */
+function easeOutCubic(t: number): number {
+  const u = 1 - t;
+  return 1 - u * u * u;
 }
 
 /** バネ状のオーバーシュート（決めアクションの出現に躍動を与える・Q12）。t:0→1 で 0→1（途中で >1）。 */

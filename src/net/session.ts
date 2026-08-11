@@ -7,7 +7,8 @@ import { pickNpcName } from '../driver/botPlayer';
 import { HostDriver } from './hostDriver';
 import { GuestDriver } from './guestDriver';
 import {
-  JOIN_TIMEOUT_MS,
+  JOIN_MAX_WAIT_MS,
+  JOIN_RETRY_MS,
   loadOrCreateRebindToken,
   NS,
   sanitizeHello,
@@ -78,6 +79,10 @@ export class NetSession {
   private guestDriver: GuestDriver | null = null;
   private snapBuffer: SnapshotMsg[] = [];
   private joinTimer = 0;
+  /** ゲスト参加待ちのリトライ間隔と最大待機（契約22項目2・テストは短縮値を注入）。 */
+  private joinRetryMs = JOIN_RETRY_MS;
+  private joinMaxMs = JOIN_MAX_WAIT_MS;
+  private joinDeadline = 0;
   private done = false;
 
   private constructor(
@@ -123,11 +128,14 @@ export class NetSession {
     transport: Transport,
     reconnect: (() => Transport) | null = null,
     selfToken: string = loadOrCreateRebindToken(code),
+    wait?: { intervalMs?: number; maxMs?: number }, // 参加待ちのリトライ設定（省略時は既定・テストは短縮）
   ): NetSession {
     const s = new NetSession('guest', code, selfPk, selfToken, name, transport, reconnect);
-    s.armJoinTimeout();
+    if (wait?.intervalMs !== undefined) s.joinRetryMs = wait.intervalMs;
+    if (wait?.maxMs !== undefined) s.joinMaxMs = wait.maxMs;
     // ホストがいつ接続しても identity を拾えるよう、参加時と各ピア接続時に hello を送る。
     s.sendHello({ pk: selfPk, name, token: selfToken });
+    s.armJoinWait();
     return s;
   }
 
@@ -365,12 +373,25 @@ export class NetSession {
 
   // ---- ゲスト側 ---------------------------------------------------------
 
-  private armJoinTimeout(): void {
-    this.joinTimer = (globalThis.setTimeout ?? setTimeout)(() => {
-      if (!this.hostPeerId && !this.done) {
-        this.handlers.error?.('ホストに接続できませんでした。ルームコードを確認して再試行してください。');
+  /**
+   * ゲスト参加待ち（契約22項目2）。旧15秒一発タイムアウトを廃し、ホストが後から現れても参加が成立する
+   * リトライ型の待機にする。joinRetryMs おきに Hello を再送し（取りこぼし/遅延接続に強い）、joinMaxMs を
+   * 超えて初めて最終エラーを出す。ホスト着信（onRoster/onStart/onReject で joinTimer クリア・hostPeerId 束縛）
+   * で即停止し、その瞬間に参加が成立する。キャンセルは dispose() が joinTimer を解放する。
+   * 再送は同一 pk/token の Hello のみ＝なりすまし検証(E7)・再束縛トークン(項目1)を一切弱めない。
+   */
+  private armJoinWait(): void {
+    this.joinDeadline = Date.now() + this.joinMaxMs;
+    const tick = (): void => {
+      if (this.done || this.hostPeerId) return; // 参加成立/破棄で停止
+      if (Date.now() >= this.joinDeadline) {
+        this.handlers.error?.('ホストが見つかりませんでした。ルームコードを確認して、もう一度お試しください。');
+        return;
       }
-    }, JOIN_TIMEOUT_MS) as unknown as number;
+      this.sendHello({ pk: this.selfPk, name: this.name, token: this.selfToken });
+      this.joinTimer = (globalThis.setTimeout ?? setTimeout)(tick, this.joinRetryMs) as unknown as number;
+    };
+    this.joinTimer = (globalThis.setTimeout ?? setTimeout)(tick, this.joinRetryMs) as unknown as number;
   }
 
   /**

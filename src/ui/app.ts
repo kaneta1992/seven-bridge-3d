@@ -50,6 +50,14 @@ interface WaitInfo {
   totalRounds: number;
 }
 
+/** Screen Wake Lock の最小形（契約22項目2）。型非同梱環境でも参照できるよう自前で定義する。 */
+interface WakeLockSentinelLike {
+  release: () => Promise<void>;
+}
+interface WakeLockLike {
+  request: (type: 'screen') => Promise<WakeLockSentinelLike>;
+}
+
 export class GameUI {
   private root: HTMLElement;
   private sceneHost!: HTMLElement;
@@ -64,6 +72,10 @@ export class GameUI {
   // 公開ルーム: ロビー画面の一覧閲覧チャネル（lobbyBrowser）と、ホストの広告チャネル（advertiser）。
   private lobbyBrowser: LobbyLink | null = null;
   private advertiser: LobbyLink | null = null;
+  // 待機ルーム/接続待ちの画面消灯対策（契約22項目2）。対応環境のみ・失敗は無害。タブ非表示で自動解放
+  // されるため、可視復帰時に wantWake が立っていれば再取得する。
+  private wakeLock: WakeLockSentinelLike | null = null;
+  private wantWake = false;
 
   private selected = new Set<string>();
   // 手札のローカル表示順（cardId の並び）。ユーザーが D&D で決めた相対順序を保持する。
@@ -157,7 +169,8 @@ export class GameUI {
     // タブ非表示で SE を止める（E3）。可視復帰で再開し、通信セッションも回復する。
     if (document.visibilityState === 'visible') {
       this.audio?.resume();
-      this.session?.recover();
+      this.session?.recover(); // 共有シート/バックグラウンドからの復帰で再join・再アナウンス（契約22項目2）
+      if (this.wantWake) void this.acquireWakeLock(); // 非表示で自動解放された Wake Lock を再取得
     } else {
       this.audio?.suspend();
     }
@@ -388,6 +401,40 @@ export class GameUI {
     this.advertiser?.dispose();
     this.advertiser = null;
     this.waitInfo = null;
+    this.disableWakeLock(); // 待機/接続画面を離れたら画面消灯抑制を解除
+  }
+
+  // ---- Screen Wake Lock（待機ルーム/接続待ちの画面消灯対策・契約22項目2） -----------
+  // 待機中に画面が消灯すると WebRTC が切れて共有URL参加が成立しづらい。対応環境でのみ取得し、失敗は無害。
+
+  private enableWakeLock(): void {
+    this.wantWake = true;
+    void this.acquireWakeLock();
+  }
+
+  private disableWakeLock(): void {
+    this.wantWake = false;
+    this.releaseWakeLock();
+  }
+
+  private async acquireWakeLock(): Promise<void> {
+    if (this.wakeLock) return;
+    try {
+      const wl = (navigator as Navigator & { wakeLock?: WakeLockLike }).wakeLock;
+      if (!wl || document.visibilityState !== 'visible') return; // 非表示中は取得不可（可視復帰で再取得）
+      this.wakeLock = await wl.request('screen');
+    } catch {
+      this.wakeLock = null; // 非対応/拒否は無害（画面消灯抑制なしで続行）
+    }
+  }
+
+  private releaseWakeLock(): void {
+    try {
+      void this.wakeLock?.release();
+    } catch {
+      /* 解放失敗は無害 */
+    }
+    this.wakeLock = null;
   }
 
   // ---- ホットシート ------------------------------------------------------
@@ -474,6 +521,7 @@ export class GameUI {
     const session = NetSession.guest(code, pk, name, transport, () => createTrysteroTransport(code));
     this.session = session;
     this.wireSession(session);
+    this.enableWakeLock(); // 接続待ちの間も画面消灯を抑制（契約22項目2）
     clear(this.root);
     renderConnecting(this.root, code, () => this.showLobby());
   }
@@ -497,6 +545,7 @@ export class GameUI {
   private renderWaiting(): void {
     if (!this.waitInfo || !this.session) return;
     const info = this.waitInfo;
+    this.enableWakeLock(); // 待機ルーム滞在中は画面消灯を抑制（契約22項目2・ホスト側の切断予防）
     clear(this.root);
     renderWaitingRoom(this.root, {
       code: info.code,
@@ -532,6 +581,7 @@ export class GameUI {
 
   private beginWithDriver(driver: GameDriver): void {
     this.teardownGame();
+    this.disableWakeLock(); // 待機ルームを出た＝Wake Lock の役目は終了（契約22項目2の範囲は待機中）
     clear(this.root);
     this.sceneHost = el('div', { id: 'scene' });
     this.overlay = el('div', { class: 'overlay' });

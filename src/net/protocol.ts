@@ -23,8 +23,13 @@ export const LOBBY_ROOM = 'seven-lobby-public-v1';
 /** 鳴き受付ウィンドウ長（ホスト権威のタイマー基準・要件 D6）。app.ts と一致させる。 */
 export const CLAIM_WINDOW_MS = 10000;
 
-/** ゲスト参加時に「ホスト応答なし」と判断してリトライ案内を出すまでの猶予（E1/E5）。 */
-export const JOIN_TIMEOUT_MS = 15000;
+/**
+ * ゲスト参加待ちのリトライ設定（契約22項目2）。旧「15秒一発タイムアウト」を廃し、ホストが後から
+ * 現れても参加が成立するリトライ型の待機にする（モバイルでホストが共有中にバックグラウンド化する
+ * シナリオ対策）。JOIN_RETRY_MS おきに Hello を再送しつつ、JOIN_MAX_WAIT_MS まで待ってから最終エラー。
+ */
+export const JOIN_RETRY_MS = 3000;
+export const JOIN_MAX_WAIT_MS = 75000;
 
 /** ルームコードの文字集合（紛らわしい 0/O/1/I/L を除外・E6）。 */
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';

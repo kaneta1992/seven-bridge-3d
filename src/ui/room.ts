@@ -18,15 +18,18 @@ export interface WaitingRoomProps {
   onRemoveNpc?: (pk: string) => void;
 }
 
-/** 接続中（ホスト応答待ち）画面。 */
+/** 接続中（ホスト応答待ち）画面。契約22項目2: リトライ型の待機を明示し、キャンセルで戻れる。 */
 export function renderConnecting(root: HTMLElement, code: string, onCancel: () => void): void {
   clear(root);
   const cancel = el('button', { text: 'キャンセル' });
   cancel.onclick = onCancel;
   const modal = el('div', { class: 'modal' }, [
-    el('h1', { text: '接続中…' }),
+    el('h1', { text: 'ホストの応答を待っています…' }),
     el('h2', { text: `ルーム ${code} に接続しています` }),
-    el('p', { class: 'hint', text: 'P2P の確立には数秒かかることがあります。' }),
+    el('p', {
+      class: 'hint',
+      text: 'ホストがスマホで共有中だと接続に少し時間がかかることがあります。自動で再試行するのでこのままお待ちください。',
+    }),
     el('div', { class: 'row' }, [cancel]),
   ]);
   root.append(el('div', { class: 'center' }, [modal]));
