@@ -43,6 +43,13 @@ export const MODELS = {
   painting: { size: { w: 1.6, h: 1.2, d: 0.12 }, fixYaw: 0, stretch: true },
   macrame: { size: { w: 1.1, h: 1.5, d: 0.15 }, fixYaw: 0, stretch: true },
   wallclock: { size: { w: 0.8, h: 0.8, d: 0.18 }, fixYaw: 0, stretch: true },
+  // ---- 第4弾（R32・契約30: 天面の小物）----
+  bookstack: { size: { w: 0.45, h: 0.32, d: 0.32 }, fixYaw: 0 },
+  vaseset: { size: { w: 0.35, h: 0.6, d: 0.35 }, fixYaw: 0 },
+  teaset: { size: { w: 0.5, h: 0.28, d: 0.4 }, fixYaw: 0 },
+  candleset: { size: { w: 0.35, h: 0.42, d: 0.35 }, fixYaw: 0 },
+  photoframes: { size: { w: 0.42, h: 0.32, d: 0.18 }, fixYaw: 0 },
+  miniplant: { size: { w: 0.3, h: 0.35, d: 0.3 }, fixYaw: 0 },
 };
 
 // 配置インスタンス: 同じモデルを複数置ける（ジオメトリ複製・テクスチャ共有＝Meshy費用ゼロ）。
@@ -111,4 +118,18 @@ export const INSTANCES = [
   { model: 'hangplant', x: -5.0, z: 3.5, yaw: 30, topY: 5.78 },
   { model: 'hangplant', x: 5.0, z: -3.5, yaw: 210, topY: 5.78 },
   { model: 'hangplant', x: 5.0, z: 3.2, yaw: 120, topY: 5.78, scale: 0.85 },
+  // ---- 天面の小物（R32・契約30: 人形カモフラージュ。snapCap で家具天面へ自動吸着するため
+  // 必ず家具インスタンスより後に並べる。かくれんぼスポットの隣に置いて人形を紛れさせる）----
+  { model: 'vaseset', x: -1.55, z: 8.45, yaw: 170, snapCap: 1.1 }, // サイドボード天面
+  { model: 'bookstack', x: -0.5, z: 8.45, yaw: 200, snapCap: 1.1 },
+  { model: 'photoframes', x: 0.55, z: 8.5, yaw: 175, snapCap: 1.1 },
+  { model: 'teaset', x: 1.5, z: 8.4, yaw: 160, snapCap: 1.1 },
+  { model: 'miniplant', x: 8.45, z: -3.9, yaw: -90, snapCap: 4.0 }, // 本棚の上
+  { model: 'bookstack', x: 8.45, z: -1.95, yaw: -100, snapCap: 4.0 },
+  { model: 'photoframes', x: 1.35, z: -8.6, yaw: 0, snapCap: 1.0 }, // TV台の天面
+  { model: 'miniplant', x: 3.85, z: -8.5, yaw: -20, snapCap: 0.7 },
+  { model: 'teaset', x: -6.35, z: 1.75, yaw: 60, snapCap: 0.3 }, // コーヒーテーブル
+  { model: 'candleset', x: -7.7, z: -1.95, yaw: 30, snapCap: 0.9 }, // サイドテーブル1
+  { model: 'bookstack', x: 8.25, z: -4.75, yaw: -70, snapCap: 0.8, scale: 0.9 }, // サイドテーブル2
+  { model: 'candleset', x: 8.5, z: 1.3, yaw: -90, snapCap: 1.0 }, // レコードコンソール
 ];

@@ -45,6 +45,13 @@ const ITEMS = [
   { name: 'painting', poly: 3000, prompt: 'framed landscape oil painting, warm sunset over golden fields, thin ornate wooden frame, wall art' },
   { name: 'macrame', poly: 4000, prompt: 'macrame wall hanging, woven cotton rope tapestry with tassels on a wooden dowel, boho style' },
   { name: 'wallclock', poly: 3000, prompt: 'vintage round wall clock, warm wooden frame, cream face with roman numerals' },
+  // ---- 第4弾（R32・契約30: 天面の小物＝人形を紛れさせるカモフラージュ）----
+  { name: 'bookstack', poly: 2500, prompt: 'small stack of three hardcover books with a tiny brass ornament on top' },
+  { name: 'vaseset', poly: 3000, prompt: 'ceramic vase with dried pampas grass flowers, warm beige tones' },
+  { name: 'teaset', poly: 3500, prompt: 'small tea set on a round wooden tray, teapot and two cups' },
+  { name: 'candleset', poly: 2500, prompt: 'three cream candles of different heights on a small brass tray' },
+  { name: 'photoframes', poly: 2000, prompt: 'two small wooden picture frames standing side by side' },
+  { name: 'miniplant', poly: 2500, prompt: 'small succulent plant in a tiny ceramic pot' },
 ];
 
 mkdirSync(OUT, { recursive: true });

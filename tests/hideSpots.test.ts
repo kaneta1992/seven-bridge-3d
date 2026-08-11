@@ -7,11 +7,9 @@ import { HIDE_SPOTS, hashSeed } from '../src/render/hideSpots';
 import { shuffle } from '../src/core';
 
 describe('かくれんぼ候補地（契約26）', () => {
-  it('候補地カタログのうち、全席可視の採用分が60以上ある', () => {
-    // R30 実測: 候補約90 → 全席可視 約70。ごちゃっと配置（契約28）で家具が視線を遮る分、
-    // 採用数は R29 より減るのが正しい挙動（=見つけにくさの向上）。1ゲームで使うのは
-    // 最大 ラウンド数×2体=12 なので 60 あればバリエーションは十分。
-    expect(HIDE_SPOTS.length).toBeGreaterThanOrEqual(60);
+  it('候補地カタログのうち、全席可視の採用分が100以上ある（2026-08-12 ユーザー要求）', () => {
+    // R32 実測: 候補123 → 全席可視 101。難所（棚の中・天面・壁掛けの上・隙間・鉢の土）中心。
+    expect(HIDE_SPOTS.length).toBeGreaterThanOrEqual(100);
   });
 
   it('全候補: スケール0.4以上・部屋(±9)と天井(6.1)内・床(-0.5)以上', () => {

@@ -135,8 +135,25 @@ for (const inst of INSTANCES) {
   const cz = (m.bb.min[2] + m.bb.max[2]) / 2;
   const y0 = m.bb.min[1];
   const yaw = deg(inst.yaw);
-  // topY: バウンディング上面を指定高さへ（天井/梁から吊る家具）。それ以外は床+yOff に接地。
-  const ty = inst.topY !== undefined ? inst.topY - bh * sy : FLOOR_Y + (inst.yOff ?? 0);
+  // topY: バウンディング上面を指定高さへ（天井/梁吊り）/ snapCap: 焼き込み済み頂点から
+  // 「(x,z) 半径0.18内・snapCap 未満の最高点」＝家具天面を自動検出して接地（R32: 小物カモフラージュ。
+  // INSTANCES で家具より後に並べること）。それ以外は床+yOff。
+  let ty;
+  if (inst.snapCap !== undefined) {
+    let best = FLOOR_Y;
+    for (const B of buckets) {
+      for (let i = 0; i < B.P.length; i += 3) {
+        const dx = B.P[i] - inst.x;
+        const dz = B.P[i + 2] - inst.z;
+        if (dx * dx + dz * dz > 0.0324) continue;
+        const vy = B.P[i + 1];
+        if (vy < inst.snapCap && vy > best) best = vy;
+      }
+    }
+    ty = best;
+  } else {
+    ty = inst.topY !== undefined ? inst.topY - bh * sy : FLOOR_Y + (inst.yOff ?? 0);
+  }
   const wb = { min: [1e9, 1e9, 1e9], max: [-1e9, -1e9, -1e9] };
   for (const p of m.parts) {
     const tile = tileOf.get(p.texKey);
