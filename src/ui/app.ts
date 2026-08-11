@@ -23,6 +23,7 @@ import { NetSession } from '../net/session';
 import { createTrysteroTransport } from '../net/trysteroTransport';
 import { orderedMeldCards } from '../render/meldSort';
 import { TableScene } from '../render/scene';
+import { SUIT_COLOR, SUIT_GLYPH } from '../render/suitStyle';
 import { AudioKit } from './audio';
 import { Callouts, countUp } from './callout';
 import { clear, el } from './dom';
@@ -31,11 +32,10 @@ import { renderConnecting, renderJoinPrompt, renderNotice, renderWaitingRoom } f
 import { buildScoreTable } from './scoreTable';
 import { loadPrefs, savePrefs } from './settings';
 
-const SUIT_GLYPH: Record<string, string> = { C: '♣', D: '♦', H: '♥', S: '♠' };
+// スートのグリフ/配色は render/suitStyle を単一ソースとして共有（4色デッキ・項目2）。
 const RANK_LABEL: Record<number, string> = {
   1: 'A', 11: 'J', 12: 'Q', 13: 'K',
 };
-const isRed = (c: Card): boolean => c.suit === 'D' || c.suit === 'H';
 const rankText = (c: Card): string => RANK_LABEL[c.rank] ?? String(c.rank);
 // 鳴きウィンドウ長は protocol.ts（ホスト権威の基準・現在10秒）を単一ソースとして import する（項目13）。
 
@@ -697,7 +697,9 @@ export class GameUI {
   }
 
   private chip(c: Card): HTMLElement {
-    return el('span', { class: 'chip' + (isRed(c) ? ' red' : ''), text: `${rankText(c)}${SUIT_GLYPH[c.suit]}` });
+    const e = el('span', { class: 'chip', text: `${rankText(c)}${SUIT_GLYPH[c.suit]}` });
+    e.style.color = SUIT_COLOR[c.suit]; // 4色デッキ（項目2）
+    return e;
   }
 
   private selectedCards(view: PlayerView): Card[] {
@@ -740,7 +742,8 @@ export class GameUI {
   }
 
   private createCardEl(c: Card): HTMLElement {
-    const e = el('div', { class: 'card' + (isRed(c) ? ' red' : '') });
+    const e = el('div', { class: 'card' });
+    e.style.color = SUIT_COLOR[c.suit]; // 4色デッキ（項目2）
     e.dataset.cardId = cardId(c);
     e.append(el('div', { class: 'big', text: rankText(c) }));
     e.append(el('div', { text: SUIT_GLYPH[c.suit] }));
@@ -984,8 +987,12 @@ export class GameUI {
 
   private moveDrag(id: string, x: number, y: number): void {
     const handTop = this.handEl!.getBoundingClientRect().top;
-    if (this.canPlayNow() && y < handTop - 6) {
-      // プレイ帯（手札の上）: 3D 標的をホバー強調。2D メルドチップ（パネル展開時）があれば優先。
+    const inBand = y >= handTop - 6;
+    // 「並び替え中」= ポインタ直下が扇のカード（自分=ゴースト以外）である時のみ。手札帯へ食い込んだ
+    // メルド（項目1a の配置でも起こり得る）へポインタが載っている場合は付け札標的として扱う（項目1b）。
+    const overHandCard = inBand && this.pointerOverHandCard(x, y, id);
+    if (this.canPlayNow() && !overHandCard) {
+      // プレイ標的（付け札/公開/捨て）をホバー強調。2D メルドチップ（パネル展開時）があれば優先。
       const v = this.lastView!;
       const card = v.hand.find((c) => cardId(c) === id) ?? null;
       const dom = card ? this.domMeldAt(card, x, y) : null;
@@ -993,15 +1000,31 @@ export class GameUI {
         this.highlightMeldChip(dom.id);
         this.scene?.setDropHover({ kind: 'meld', meldId: dom.id });
       } else {
+        const t = this.scene?.dropTargetAt(x, y) ?? null;
+        // 手札帯へ食い込む位置では付け札(meld)標的のみ受け付け、捨て/場の誤ホバーを防ぐ。
         this.clearMeldHighlight();
-        this.scene?.setDropHover(this.scene?.dropTargetAt(x, y) ?? null);
+        this.scene?.setDropHover(inBand && t?.kind !== 'meld' ? null : t);
       }
     } else {
       this.clearMeldHighlight();
       this.scene?.setDropHover(null);
-      this.reorderDuringDrag(id, x); // 手札帯内は並び替え
+      this.reorderDuringDrag(id, x); // 手札帯内・扇の上 = 並び替え
     }
     this.layoutFan({ id, x, y });
+  }
+
+  // ポインタ直下（ドラッグ中のゴースト自身を除く）に手札扇のカードがあるか。
+  // resolveDrop / moveDrag のガードで「並び替え」と「卓上標的への付け札」を区別する（項目1b）。
+  // 手札帯へ食い込んだ 3D メルドへ落とした場合、ポインタ下は扇カードでない → 付け札として受理できる。
+  private pointerOverHandCard(x: number, y: number, dragId: string): boolean {
+    const stack = document.elementsFromPoint(x, y);
+    for (const node of stack) {
+      const cardEl = (node as HTMLElement).closest?.('.card') as HTMLElement | null;
+      if (!cardEl) continue;
+      if (cardEl.dataset.cardId === dragId) continue; // ドラッグ中ゴースト自身は無視
+      return true; // 別の手札カード上 = 並び替え意図
+    }
+    return false;
   }
 
   private highlightMeldChip(meldId: number): void {
@@ -1063,7 +1086,10 @@ export class GameUI {
     if (!card) return false;
     const me = this.driver!.currentPlayerId();
     const handTop = this.handEl!.getBoundingClientRect().top;
-    if (y >= handTop - 6) return false; // 手札帯内 = 並び替え
+    const inBand = y >= handTop - 6;
+    // 手札帯内でも、ポインタ直下が扇のカードでなければ並び替えではない（項目1b）。自席メルドが手札帯へ
+    // 食い込む配置（項目1a）でも、メルド上へ落とせば付け札を成立させる。扇カード上のみ並び替え扱い。
+    if (inBand && this.pointerOverHandCard(x, y, id)) return false; // 手札帯・扇の上 = 並び替え
     // 1) 2D メルドチップ（パネル展開時の付け札導線）
     const dom = this.domMeldAt(card, x, y);
     if (dom) {
@@ -1078,6 +1104,9 @@ export class GameUI {
       void this.dispatch({ type: 'attach', player: me, meldId: target.meldId, card }, () => this.selected.clear());
       return true;
     }
+    // 手札帯へ食い込んだ位置での捨て/場の誤爆を防ぐ（卓中央=捨て/場は帯より上に投影される）。
+    // メルド以外の標的は帯内では受け付けず並び替え/取消に倒す（項目1b・E2 既存挙動の保全）。
+    if (inBand) return false;
     if (target.kind === 'discard') {
       void this.dispatch({ type: 'discard', player: me, card }, () => this.selected.clear());
       return true;

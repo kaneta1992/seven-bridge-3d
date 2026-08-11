@@ -30,10 +30,10 @@ interface Placed {
   tan: { x: number; z: number };
 }
 
-function place(seatCount: number, seatIndex: number, melds: MeldInput[]) {
+function place(seatCount: number, seatIndex: number, melds: MeldInput[], selfSeat = false) {
   const dir = seatDir(seatIndex, seatCount);
   const tan = { x: -dir.z, z: dir.x };
-  const res = layoutSeatMelds(seatCount, dir.x, melds);
+  const res = layoutSeatMelds(seatCount, dir.x, melds, selfSeat);
   const halfH = (CARD_H * res.scale) / 2;
   const halfW = (CARD_W * res.scale) / 2;
   const placed: Placed[] = res.slots.map((sl) => ({
@@ -88,8 +88,8 @@ interface Metrics {
   overflow: boolean;
 }
 
-function analyze(seatCount: number, seatIndex: number, melds: MeldInput[]): Metrics {
-  const { res, placed } = place(seatCount, seatIndex, melds);
+function analyze(seatCount: number, seatIndex: number, melds: MeldInput[], selfSeat = false): Metrics {
+  const { res, placed } = place(seatCount, seatIndex, melds, selfSeat);
   const sectorHalf = Math.PI / seatCount;
   let minPileClear = Infinity;
   let minOriginClear = Infinity;
@@ -199,5 +199,59 @@ describe('メルド配置の幾何検証（契約11 E1）', () => {
       expect(s).toBeLessThanOrEqual(prev + 1e-9);
       prev = s;
     }
+  });
+});
+
+// 自席（selfSeat=true）は付け札D&Dのため「手札帯より上」へメルドを寄せる（契約12 項目1a）。
+// scene のカメラ投影実測（scratchpad/proj）で、半径 u < 1.62 のメルド中心は既定カメラで手札帯 top
+// より上へ投影される（縦横とも）。ここでは u を代理指標に「最内帯・単一段・非自席より内側」を検証する。
+describe('自席メルドの可視域配置（契約12 項目1a）', () => {
+  const U_ABOVE = 1.62; // これ未満の u は既定カメラ（縦横）で手札帯 top より上に投影（proj 実測）
+  const selfMaxU = (n: number, seat: number, ms: MeldInput[]): number =>
+    Math.max(...place(n, seat, ms, true).placed.map((p) => p.u));
+  const nonMaxU = (n: number, seat: number, ms: MeldInput[]): number =>
+    Math.max(...place(n, seat, ms, false).placed.map((p) => p.u));
+  const selfRows = (n: number, seat: number, ms: MeldInput[]): number =>
+    new Set(place(n, seat, ms, true).placed.map((p) => Math.round(p.u * 1000))).size;
+
+  it('自席レイアウトも中央保護/隣席不可侵/ギャップ制約を満たす（中央保護は自席でも不可侵）', () => {
+    expectSafe(analyze(2, 0, melds([3, 3, 3]), true), '2人自席3メルド');
+    for (let s = 0; s < 6; s++) expectSafe(analyze(6, s, melds([3, 3, 3]), true), `6人自席 seat${s}`);
+    for (let s = 0; s < 4; s++) expectSafe(analyze(4, s, melds([3, 3, 3]), true), `4人自席 seat${s}`);
+    // E1（現実的な混雑）: 5メルド / 13枚シークエンス+メルド は自席でも収容できる（overflow=false）。
+    // 注: 25枚超（[13,3,3,3,3]=25 等）は 6p の狭セクタで自席/非自席とも overflow=true（R12 由来の
+    // 幾何的上限・本契約の変更対象外）。現実のゲームで1席が25枚超の公開札を持つことはまず無い。
+    expectSafe(analyze(6, 1, melds([3, 3, 3, 3, 3]), true), '6人自席 5メルド');
+    expectSafe(analyze(6, 1, melds([13, 4]), true), '6人自席 13seq+4');
+  });
+
+  it('2人卓の自席メルドは単一段・最内帯（u<1.62=手札帯より上へ投影）', () => {
+    expect(selfRows(2, 0, melds([3, 3, 3]))).toBe(1);
+    expect(selfMaxU(2, 0, melds([3, 3, 3]))).toBeLessThan(U_ABOVE);
+  });
+
+  it('中央正対（dir.x≈0）の自席は単独メルドが最内帯（u<1.62）＝付け札可視域に置かれる', () => {
+    // dir.x=0 の席（2p両席/4p seat0,2/6p seat0,3）は山札/捨て札が正面に無く中央側へ寄せられる。
+    expect(selfMaxU(2, 0, melds([3]))).toBeLessThan(U_ABOVE);
+    expect(selfMaxU(4, 0, melds([3]))).toBeLessThan(U_ABOVE);
+    expect(selfMaxU(6, 0, melds([3]))).toBeLessThan(U_ABOVE);
+  });
+
+  it('自席は段数を最小化しメルドを内側へ寄せる＝最外 u が通常配置以下（外周へ伸ばさない）', () => {
+    const cs: [number, number, number[]][] = [
+      [2, 0, [3, 3]], [4, 0, [3, 3]], [4, 1, [3, 3, 3]],
+      [6, 0, [3]], [6, 1, [3]], [6, 1, [3, 3, 3]], [6, 1, [13, 3, 3, 3, 3, 3]],
+    ];
+    for (const [n, s, arr] of cs)
+      expect(selfMaxU(n, s, melds(arr)), `self<=non ${n}p seat${s}`).toBeLessThanOrEqual(
+        nonMaxU(n, s, melds(arr)) + 1e-9,
+      );
+  });
+
+  it('多メルド/混雑席でも段数最小化が効く（自席は非自席より確実に内側へ寄る）', () => {
+    expect(selfMaxU(4, 0, melds([3, 3]))).toBeLessThan(nonMaxU(4, 0, melds([3, 3])));
+    expect(selfMaxU(6, 0, melds([3]))).toBeLessThan(nonMaxU(6, 0, melds([3])));
+    expect(selfMaxU(6, 1, melds([3]))).toBeLessThan(nonMaxU(6, 1, melds([3])));
+    expect(selfMaxU(6, 1, melds([3, 3, 3]))).toBeLessThan(nonMaxU(6, 1, melds([3, 3, 3])));
   });
 });

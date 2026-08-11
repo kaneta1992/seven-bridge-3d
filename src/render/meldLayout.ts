@@ -75,7 +75,12 @@ interface Cell {
  * どのスケールでも収まらない場合は最小スケールで中央方向へ溢れさせ overflow=true を返す
  * （カードは決して落とさない）。
  */
-export function layoutSeatMelds(seatCount: number, dirX: number, melds: MeldInput[]): MeldLayout {
+export function layoutSeatMelds(
+  seatCount: number,
+  dirX: number,
+  melds: MeldInput[],
+  selfSeat = false,
+): MeldLayout {
   const cells: Cell[] = [];
   for (const m of melds) {
     const cnt = Math.max(1, m.count);
@@ -83,15 +88,24 @@ export function layoutSeatMelds(seatCount: number, dirX: number, melds: MeldInpu
   }
   if (cells.length === 0) return { scale: SCALE_MAX, slots: [], overflow: false };
 
+  // 中央保護（山札/捨て札の非被覆）は自席でも不可侵に保つ＝rc は共通（契約12: 中央保護維持）。
   const rc = centerKeepout(dirX);
   const sectorHalf = sectorHalfAngle(seatCount);
 
-  for (let s = SCALE_MAX; s >= SCALE_MIN - 1e-9; s -= SCALE_STEP) {
-    const slots = flow(cells, s, rc, sectorHalf, false);
-    if (slots) return { scale: round2(s), slots, overflow: false };
+  // 段数の探索順。自席は「段数を最小化 → その段数で最大スケール」の順に探す＝メルドを最内帯へ
+  // 集め、外周（画面下＝手札帯側）へ段を伸ばさない（項目1a）。段は画面下方向へ投影されるため、
+  // 段を減らすほどメルドが手札帯より上に集まり付け札しやすい。スケール縮小で段数を優先的に抑える。
+  // 段が減らせないケースは順に段数を緩め、最終的に従来と同じ無制限段へ落ちる。
+  // 他席は従来どおり段数無制限（最大スケール優先）。
+  const rowCaps = selfSeat ? [1, 2, 3, 4, 5, 6, 7, 8, Infinity] : [Infinity];
+  for (const cap of rowCaps) {
+    for (let s = SCALE_MAX; s >= SCALE_MIN - 1e-9; s -= SCALE_STEP) {
+      const slots = flow(cells, s, rc, sectorHalf, false, cap);
+      if (slots) return { scale: round2(s), slots, overflow: false };
+    }
   }
   // 最小スケールでも収まらない（病的ケース: 極小セクタに超多数メルド）。溢れを許容し報告する。
-  const slots = flow(cells, SCALE_MIN, rc, sectorHalf, true)!;
+  const slots = flow(cells, SCALE_MIN, rc, sectorHalf, true, Infinity)!;
   return { scale: SCALE_MIN, slots, overflow: true };
 }
 
@@ -107,6 +121,7 @@ function flow(
   rc: number,
   sectorHalf: number,
   force: boolean,
+  rowCap = Infinity,
 ): CardSlot[] | null {
   const w = CARD_W * s;
   const step = STEP * s;
@@ -116,7 +131,9 @@ function flow(
   const bandLo = rc + halfH; // 最内行の中心半径（中央保護の床）
   const bandHi = R_RIM_EDGE - halfH; // 最外行の中心半径の上限（rim）
   if (bandHi < bandLo && !force) return null; // 席がカード1枚ぶんの帯すら確保できない → 縮小
-  const maxRows = Math.max(1, Math.floor((bandHi - bandLo) / rowPitch) + 1);
+  // 物理的に置ける最大段数。rowCap（自席の段数上限プリファレンス）で更に絞る（項目1a）。
+  const physMaxRows = Math.max(1, Math.floor((bandHi - bandLo) / rowPitch) + 1);
+  const maxRows = force ? physMaxRows : Math.min(physMaxRows, rowCap);
 
   const slots: CardSlot[] = [];
   const tanS = Math.tan(sectorHalf);

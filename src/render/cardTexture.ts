@@ -1,14 +1,13 @@
 // カード面/裏のプロシージャルテクスチャ生成（Canvas）。外部アセット依存なし（要件 D7）。
 // 高解像度 + 異方性フィルタで文字の滲みを防ぐ（プリモーテム E5）。
 import * as THREE from 'three';
-import type { Card, Rank, Suit } from '../core';
+import type { Card, Rank } from '../core';
 import { cardId } from '../core';
+import { SUIT_COLOR, SUIT_GLYPH } from './suitStyle';
 
 const W = 512;
 const H = 716; // 約 5:7（トランプ比）
 
-const SUIT_GLYPH: Record<Suit, string> = { C: '♣', D: '♦', H: '♥', S: '♠' };
-const RED: Suit[] = ['D', 'H'];
 const RANK_LABEL: Record<Rank, string> = {
   1: 'A', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6', 7: '7',
   8: '8', 9: '9', 10: '10', 11: 'J', 12: 'Q', 13: 'K',
@@ -68,8 +67,7 @@ function fitText(ctx: CanvasRenderingContext2D, text: string, x: number, y: numb
 // 伝統的なピップ配置は卓上の遠距離で読み取りづらいため、忠実さより読み取りやすさを優先し
 // 中央に巨大なランク文字とスートを配置する（画面下の 2D 手札カード＝ランク大＋スートの構成と整合）。
 function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
-  const red = RED.includes(card.suit);
-  const color = red ? '#c0212f' : '#1b1b22';
+  const color = SUIT_COLOR[card.suit]; // 4色デッキ（項目2）
   const glyph = SUIT_GLYPH[card.suit];
   const label = RANK_LABEL[card.rank];
   const twoChar = label.length > 1; // "10"
@@ -113,11 +111,14 @@ function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
   ctx.fillText(glyph, W / 2, H * 0.74);
 
   if (card.rank === 7) {
-    // 単独7でメルドになり得る特別なカード: 淡いハイライトリング
-    ctx.strokeStyle = red ? 'rgba(192,33,47,0.35)' : 'rgba(27,27,34,0.28)';
+    // 単独7でメルドになり得る特別なカード: スート色の淡いハイライトリング
+    ctx.save();
+    ctx.globalAlpha = 0.32;
+    ctx.strokeStyle = color;
     ctx.lineWidth = 8;
     roundRect(ctx, 40, 40, W - 80, H - 80, 34);
     ctx.stroke();
+    ctx.restore();
   }
 }
 

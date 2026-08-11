@@ -470,7 +470,8 @@ export class TableScene {
         orderedById.set(m.id, cards);
         return { id: m.id, count: cards.length };
       });
-      const layout = layoutSeatMelds(this.seatCount, dir.x, inputs);
+      // 自席（viewYou）は「手札帯より上」へ寄せる自席専用レイアウト（控えめバルジ+段数最小化・項目1a）。
+      const layout = layoutSeatMelds(this.seatCount, dir.x, inputs, seat === this.viewYou);
       for (const slot of layout.slots) {
         const card = orderedById.get(slot.meldId)?.[slot.index];
         if (!card) continue;

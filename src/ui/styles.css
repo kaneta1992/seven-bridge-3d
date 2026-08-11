@@ -226,9 +226,6 @@ button.danger {
   border: 1px solid rgba(0, 0, 0, 0.2);
   line-height: 1;
 }
-.chip.red {
-  color: #c0212f;
-}
 
 /* ---- 下部: 手札 + アクション（overlay とは別の永続コンテナ・R4項目3） ---- */
 .bottom {
@@ -282,9 +279,6 @@ button.danger {
 }
 .card .big {
   font-size: 22px;
-}
-.card.red {
-  color: #c0212f;
 }
 .card.dim {
   /* 2026-08-11 非手番の半透明表示を廃止（ユーザーが不具合と誤認するため）。
