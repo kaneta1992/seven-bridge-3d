@@ -151,7 +151,7 @@ export class GameUI {
   };
 
   private onVisibility = (): void => {
-    // タブ非表示で BGM/音を止める（E3）。可視復帰で再開し、通信セッションも回復する。
+    // タブ非表示で SE を止める（E3）。可視復帰で再開し、通信セッションも回復する。
     if (document.visibilityState === 'visible') {
       this.audio?.resume();
       this.session?.recover();
@@ -490,7 +490,6 @@ export class GameUI {
 
     // SFX とコールアウト層。コールアウトは overlay とは別に root 直下へ（最前面・pointer 透過）。
     this.audio = new AudioKit();
-    this.audio.bgmStart(); // ループBGM開始（未解錠なら初回操作で鳴り始める・Q4）
     this.callouts = new Callouts(this.root);
     this.buildControls(); // 永続ボタン群を一度だけ生成（audio 生成後にミュート状態を反映）
 

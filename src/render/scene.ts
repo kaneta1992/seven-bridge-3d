@@ -30,13 +30,18 @@ const DECK_QUAT = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 
 const DISCARD_R = 0.62; // 捨て札ドロップ判定の半径（山札 +0.5 と干渉しない大きさ）
 const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓外＝取り消し）
 
-// ユーザーカメラ操作（契約07項目1）: 卓中心まわりのオービット。ズーム=半径、スワイプ=方位/仰角。
-const MIN_ORBIT_R = 3.4; // ズーム最接近（卓面へ寄れる下限・クリッピング回避）
-const MAX_ORBIT_R = 13.0; // ズーム最遠（全卓俯瞰の上限・fog 手前に収める）
-const MIN_ORBIT_PITCH = 0.14; // 仰角下限（卓すれすれ・約8°。遠い席名を見に行ける）
-const MAX_ORBIT_PITCH = 1.45; // 仰角上限（ほぼ真上・約83°。卓が裏返らない）
-const ORBIT_YAW_SENS = 0.006; // 方位感度（rad/px）
-const ORBIT_PITCH_SENS = 0.006; // 仰角感度（rad/px）
+// ユーザーカメラ操作（契約17項目7）: 自席固定の首振り（見渡し）。視点位置は自席の目線に固定し、
+// ドラッグ/スワイプでヨー・ピッチ（見回し）、ピンチ/ホイールでズーム（FOV）を操作する。
+// オービット（卓中心を軸に回り込む）は廃止した。回り込みが物理的に無くなるため他家手札の遮蔽
+// フェード（updateHandOcclusion）は不要化した（E5）。
+const EYE_BACK = 1.6; // 自席（SEAT_R）からさらに外側へ引いた目線の水平位置（卓の縁越しに見渡す）
+const EYE_HEIGHT = 1.85; // 着席した目線の高さ（卓面 y=0 の上）
+const MIN_PITCH = -1.3; // 見下ろし限界（卓面直下まで・カードが裏返らない約 -74°）
+const MAX_PITCH = 0.66; // 見上げ限界（天井まで・真上で反転しない約 +38°）
+const MIN_FOV = 32; // ズームイン限界（望遠寄り）
+const MAX_FOV = 74; // ズームアウト限界（広角寄り・真後ろの壁も破綻せず入る）
+const LOOK_YAW_SENS = 0.0044; // ヨー感度（rad/px）
+const LOOK_PITCH_SENS = 0.0044; // ピッチ感度（rad/px）
 // 捨て札タップ判定（契約14項目2/E2）: これ以上動いたらスワイプ、これ以上時間がかかったら長押し扱い。
 const TAP_MOVE_MAX = 8; // px（手札 D&D の並び替え閾値と同値・一貫）
 const TAP_TIME_MAX = 500; // ms
@@ -99,13 +104,13 @@ export class TableScene {
   private camPosGoal = new THREE.Vector3(0, 4, 6);
   private camTargetGoal = new THREE.Vector3(0, 0, 0);
 
-  // ユーザーカメラ操作の状態（契約07項目1）。userControlled 中は自動フレーミング（aimCameraAt）を
-  // 抑止し、ユーザーが選んだ視点を保持する。リセットボタン / ラウンド切替（clearCards）で解除。
+  // ユーザーカメラ操作の状態（契約17項目7）。userControlled 中は自動フレーミング（aimCameraAt）を
+  // 抑止し、ユーザーが選んだ首振り角/ズームを保持する。リセットボタン / ラウンド切替（clearCards）で解除。
+  // 視点位置は自席固定なので camPosGoal（=目線）はユーザー操作では動かさず、lookYaw/lookPitch だけを動かす。
   private userControlled = false;
-  private orbitYaw = 0;
-  private orbitPitch = 0.6;
-  private orbitRadius = 7.4;
-  private orbitTarget = new THREE.Vector3();
+  private lookYaw = 0; // 見回しのヨー（水平角・rad）
+  private lookPitch = -0.42; // 見回しのピッチ（俯仰角・rad。負=見下ろし）
+  private lookFov = 46; // 現在のズーム（画角）
   private pointers = new Map<number, { x: number; y: number }>();
   private pinchDist = 0;
   private onCamPointerDown!: (e: PointerEvent) => void;
@@ -145,8 +150,13 @@ export class TableScene {
   // ドロップ光枠のフェードアウト（Q15）。hideDropTargets は即消しでなくここでフェードしてから片付ける。
   private dropHiding = false;
   private dropHideAt = 0;
-  // 手番席の存在感（Q15）: フェルト上の柔らかな光だまり。spotTarget に追従して脈動する。
+  // 手番表示（契約17項目2 再設計）: 現手番席の卓上に淡い金色の光だまり + 細い金環を出し「誰の番か」を
+  // 席方向で明示する（席名ラベルの金強調と連動）。自席の手番では控えめ（ほぼ非表示）にして、旧実装の
+  // 「自分の前に出る謎の白い円」感を解消する。spotTarget（現手番席の前）に追従して脈動する。
   private spotGlow!: THREE.Mesh;
+  private spotRing!: THREE.Mesh; // 光だまりを縁取る細い金環（手番マーカーだと分かる輪郭）
+  private activeSeatSelf = false; // 現手番が自席か（自席では光だまりを控えめにする）
+  private spotGlowOp = 0; // 光だまりの現在不透明度（表示/非表示をフェード）
   // 鳴きウィンドウ開始演出（Q11）: 対象の捨て札上で脈動する3Dハイライトリング。
   private claimRing!: THREE.Mesh;
   private claimFocusActive = false;
@@ -423,8 +433,8 @@ export class TableScene {
    * カード視認性を損なわないよう壁は暗めの暖色。モバイル（low ティア）では窓/据置ライトを省き軽量化。
    */
   private buildRoom(): void {
-    const S = 24; // 部屋の一辺（家具が視界に入る距離まで壁を寄せ、居間らしい囲われ感を出す・U1）
-    const H = 7.6; // 天井高
+    const S = 18; // 部屋の一辺（首振り[項目7]でどの方向を見ても家具が入る距離まで壁を寄せる・項目6）
+    const H = 6.6; // 天井高（一回り低くして居間の密度を上げる・項目6）
     const floorY = -0.5;
     const wallZ = S / 2; // 壁の内面座標
     // BoxGeometry の面順: +x, -x, +y(天井), -y(床), +z, -z。面ごとに材質を割り当てる。
@@ -439,7 +449,7 @@ export class TableScene {
     room.receiveShadow = false; // 内壁は影計算に含めない（コスト削減・見た目に不要）
     this.scene.add(room);
     // 部屋を寄せたのでフォグ遠方を壁の手前に合わせ直す（壁が奥へ自然に溶ける）。
-    this.scene.fog = new THREE.Fog('#40301f', 12, 26);
+    this.scene.fog = new THREE.Fog('#40301f', 10, 22);
     this.buildFurniture(floorY, wallZ, H);
   }
 
@@ -565,6 +575,45 @@ export class TableScene {
     cylMesh(emis('#fff0d0'), 0.9, 0.14, 0, ceilY, 0);
     cylMesh(mat('#2a2018', 0.7), 0.05, 0.5, 0, ceilY - 0.35, 0); // 吊り棒
 
+    // 天井の梁（項目6・密度向上）: 見上げても「しつらえられた部屋」に見えるよう、木の梁を2本渡す。
+    // 中央の吊り照明を避けて x=±5 に配置（首振りで天井方向を見たときの構造感）。
+    for (const bx of [-5, 5]) boxMesh(woodDark, 0.3, 0.3, wallZ * 2 - 1.2, bx, ceilY - 0.12, 0);
+
+    // サイドボード + 小物（+z 壁・額の下）: 長い低いキャビネット天板 + 引き出し面 + 花瓶/本/置時計（項目6）。
+    const sbY = floorY + 0.55;
+    const sbZ = wallZ - 0.42;
+    boxMesh(woodMid, 3.6, 1.1, 0.7, 0, sbY, sbZ); // 本体
+    boxMesh(woodDark, 3.7, 0.12, 0.78, 0, sbY + 0.6, sbZ); // 天板
+    boxMesh(mat('#2a1e12', 0.7), 1.6, 0.7, 0.04, -0.9, sbY, sbZ - 0.34); // 引き出し面（左）
+    boxMesh(mat('#2a1e12', 0.7), 1.6, 0.7, 0.04, 0.9, sbY, sbZ - 0.34); // 引き出し面（右）
+    cylMesh(mat('#7a9bb0', 0.4, 0.1), 0.13, 0.5, -1.2, sbY + 0.9, sbZ); // 花瓶
+    boxMesh(mat('#b5462f', 0.85), 0.5, 0.28, 0.34, 1.1, sbY + 0.78, sbZ); // 積み本
+    boxMesh(mat('#3f6ea5', 0.85), 0.44, 0.2, 0.3, 1.1, sbY + 0.98, sbZ); // 積み本（上）
+    // 置時計（サイドボード上・小物）: 枠 + 発光文字盤。
+    boxMesh(woodDark, 0.4, 0.5, 0.18, 0.1, sbY + 0.9, sbZ); // 時計筐体
+    add(new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.32), emis('#fef0c8'))).position.set(0.1, sbY + 0.92, sbZ - 0.1);
+
+    // 壁掛け時計（-x 壁・ソファ上）: 丸い文字盤 + 針。首振りで側方を見たときのアクセント（項目6）。
+    const clockX = -wallZ + 0.12;
+    const clockY = floorY + 4.2;
+    const clockFace = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.08, 24), emis('#f3ead2'));
+    clockFace.rotation.z = Math.PI / 2; // 円盤面を +x（室内側）へ向ける
+    clockFace.position.set(clockX, clockY, 1.0);
+    add(clockFace);
+    const clockRim = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.05, 10, 28), mat('#2a1e12', 0.6));
+    clockRim.rotation.y = Math.PI / 2;
+    clockRim.position.set(clockX + 0.02, clockY, 1.0);
+    add(clockRim);
+    boxMesh(mat('#1b1610', 0.6), 0.03, 0.34, 0.04, clockX + 0.06, clockY + 0.08, 1.0); // 長針
+    boxMesh(mat('#1b1610', 0.6), 0.03, 0.04, 0.24, clockX + 0.06, clockY, 1.0); // 短針
+
+    // フロアスタンドライト（+x/-z 角・本棚と窓の間）: 台 + 支柱 + 発光シェード（項目6・照明で加点）。
+    const flX = wallZ - 1.0;
+    const flZ = -wallZ + 1.2;
+    cylMesh(mat('#20242b', 0.5, 0.2), 0.28, 0.1, flX, floorY + 0.05, flZ); // 台座
+    cylMesh(mat('#20242b', 0.5, 0.2), 0.05, 2.4, flX, floorY + 1.2, flZ); // 支柱
+    add(new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.6, 20, 1, true), emis('#ffe6b0'))).position.set(flX, floorY + 2.5, flZ); // シェード
+
     // 照明: 環境光/半球光は buildEnvironment で全ティア明るめ。ここでは温かみの点光源を足す。
     // 高ティアは窓＋ランプ＋天井の3点光源、低ティアは天井1点に絞って軽量化（ジオメトリは同一・U1）。
     const ceilingLight = new THREE.PointLight(0xfff0d0, this.quality.name === 'low' ? 18 : 14, 20, 2);
@@ -579,6 +628,10 @@ export class TableScene {
       const lamp = new THREE.PointLight(0xffb066, 10, 12, 2);
       lamp.position.set(stX, floorY + 1.75, stZ);
       this.scene.add(lamp);
+      // フロアスタンドライトの点光源（項目6の追加照明・角を暖める）。
+      const floorLamp = new THREE.PointLight(0xffd9a0, 8, 11, 2);
+      floorLamp.position.set(flX, floorY + 2.4, flZ);
+      this.scene.add(floorLamp);
     }
   }
 
@@ -897,6 +950,8 @@ export class TableScene {
     this.spotTargetGoal.y = 0;
     this.spotPosGoal.copy(dir).multiplyScalar(SEAT_R * 0.5);
     this.spotPosGoal.y = 8.5;
+    // 自席の手番では光だまりを控えめに（契約17項目2）。自分の番は 2D 手札・手番バナーで自明。
+    this.activeSeatSelf = seatIndex === this.viewYou;
     this.wake();
   }
 
@@ -1000,11 +1055,12 @@ export class TableScene {
     this.fieldRing = mk(0.62, 0.8, '#37e08a'); // メルド公開 = 緑
     this.meldRingGeo = new THREE.RingGeometry(0.34, 0.46, 40); // 付け札光枠（メルドごとに材質を持つ）
 
-    // 手番席の光だまり（Q15）: フェルト上の柔らかな暖色ディスク。加算合成で床が仄かに照らされて見える。
+    // 手番の光だまり（契約17項目2）: 現手番席の卓上に置く柔らかな金色ディスク。加算合成で床が仄かに
+    // 照らされて見える。青みを抑えた金（白飛びしない）にして「白い円」感を解消する。
     this.spotGlow = new THREE.Mesh(
-      new THREE.CircleGeometry(1.25, 40),
+      new THREE.CircleGeometry(1.15, 40),
       new THREE.MeshBasicMaterial({
-        color: '#ffdca0',
+        color: '#ffb64a',
         transparent: true,
         opacity: 0,
         depthWrite: false,
@@ -1015,6 +1071,23 @@ export class TableScene {
     this.spotGlow.position.set(0, TABLE_TOP_Y + 0.021, 0);
     this.spotGlow.renderOrder = 2;
     this.scene.add(this.spotGlow);
+    // 光だまりを縁取る細い金環。塗りだけだと「何の円？」になりがちなので、輪郭で手番マーカーだと示す。
+    this.spotRing = new THREE.Mesh(
+      new THREE.RingGeometry(1.1, 1.24, 48),
+      new THREE.MeshBasicMaterial({
+        color: '#ffd27a',
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    this.spotRing.rotation.x = -Math.PI / 2;
+    this.spotRing.position.set(0, TABLE_TOP_Y + 0.022, 0);
+    this.spotRing.renderOrder = 2;
+    this.spotRing.layers.enable(BLOOM_LAYER);
+    this.scene.add(this.spotRing);
 
     // 鳴きウィンドウ開始ハイライト（Q11）: 捨て札上の脈動リング。発光として滲ませる。
     this.claimRing = new THREE.Mesh(
@@ -1541,53 +1614,48 @@ export class TableScene {
   }
 
   /**
-   * カメラが回り込んで他家の空中手札（裏面）が視界を塞ぐ間、その手札を隠す（契約14項目4）。
-   * 判定: 卓中心から見たカメラの水平方向 camDir と各席方向 seatDir の内積。内積が大きい席ほど
-   * 「カメラと卓中心の間（＝手前）」にあり、その裏面手札が中央のやり取りを覆う。既定視点（自席の
-   * 背後）では手前席＝自席（空中手札なし）なので他家は隠れない＝リセット直後に誤発火しない（E3）。
-   * ヒステリシス（enter 0.62 / exit 0.46）でしきい値付近のちらつきを防ぐ。自席は元々空中手札なし。
+   * 首振りモデル（契約17項目7）では視点位置が自席に固定され、カメラが他家の手前へ回り込むことが
+   * 原理的に無くなった。他家の空中手札（裏面）が中央のやり取りを覆う状況が生じないため、旧オービット
+   * 時代の遮蔽フェード（契約14項目4）は不要化した（E5・挙動整理を報告）。念のため遮蔽状態を常に解除し、
+   * すべての手札を可視のまま保つ。
    */
   private updateHandOcclusion(): void {
-    const camDir = TMP_A.set(this.camera.position.x, 0, this.camera.position.z);
-    if (camDir.lengthSq() < 1e-6) return;
-    camDir.normalize();
-    for (let seat = 0; seat < this.seatCount; seat++) {
-      if (seat === this.viewYou) {
-        this.blockedSeats.delete(seat);
-        continue;
-      }
-      const dot = this.seatDir(seat).dot(camDir);
-      const was = this.blockedSeats.has(seat);
-      const now = was ? dot > 0.46 : dot > 0.62; // ヒステリシス
-      if (now) this.blockedSeats.add(seat);
-      else this.blockedSeats.delete(seat);
-    }
-    // 席ごとの遮蔽状態を空中手札カード（キー h:<席>:<スロット>）へ反映。山札（d:）は対象外。
-    // 即時 visible 切替ではなく occluded フラグを立て、loop が opacity をフェード（U3・0.2〜0.4s 相当）。
-    for (const [key, obj] of this.backById) {
-      if (key.charCodeAt(0) !== 104 /* 'h' */) continue;
-      const seat = parseInt(key.slice(2), 10);
-      obj.occluded = this.blockedSeats.has(seat);
+    if (this.blockedSeats.size) this.blockedSeats.clear();
+    for (const [, obj] of this.backById) {
+      if (obj.occluded) obj.occluded = false;
     }
   }
 
+  /**
+   * 既定視点（契約17項目7）: 視点位置を指定席の「着席した目線」へ置き、卓中央を見渡す既定の
+   * ヨー/ピッチ/画角へ戻す。首振りモデルなので視点位置は自席に固定され、回り込みは起きない。
+   * ホットシートでは youIndex が手番ごとに変わるため、目線が新しい操作者席へ移る（契約14項目3）。
+   */
   private aimCameraAt(seatIndex: number): void {
+    const eye = this.eyeFor(seatIndex);
+    this.camPosGoal.copy(eye);
+    // 既定の見回し角: 自席の目線から卓中央（やや先の卓上）を見下ろす。
     const dir = this.seatDir(seatIndex);
-    const portrait = this.aspect() < 1;
-    const back = portrait ? 3.4 : 2.7;
-    const height = portrait ? 4.6 : 3.6;
-    const fwd = portrait ? 0.1 : 0.35;
-    this.camPosGoal.copy(dir).multiplyScalar(SEAT_R + back);
-    this.camPosGoal.y = height;
-    this.camTargetGoal.copy(dir).multiplyScalar(fwd);
-    this.camTargetGoal.y = 0;
-    this.camera.fov = this.orientationFov();
+    const lookAt = TMP_A.copy(dir).multiplyScalar(-0.6);
+    lookAt.y = -0.05;
+    const d = TMP_B.copy(lookAt).sub(eye);
+    this.lookYaw = Math.atan2(d.z, d.x);
+    this.lookPitch = clamp(Math.atan2(d.y, Math.hypot(d.x, d.z)), MIN_PITCH, MAX_PITCH);
+    this.lookFov = this.orientationFov();
+    this.camera.fov = this.lookFov;
     this.camera.updateProjectionMatrix();
+    this.applyLook();
   }
 
-  /** 画面の縦横に応じた画角（縦画面は視野が狭いので広角側）。aimCameraAt と resize で共有する（項目14）。 */
+  /** 指定席の着席した目線のワールド位置（自席固定の首振り視点・卓の縁越しに見渡す高さ）。 */
+  private eyeFor(seatIndex: number): THREE.Vector3 {
+    const dir = this.seatDir(seatIndex);
+    return dir.clone().multiplyScalar(SEAT_R + EYE_BACK).setY(EYE_HEIGHT);
+  }
+
+  /** 画面の縦横に応じた既定画角（縦画面は視野が狭いので広角側）。aimCameraAt と resize で共有する。 */
   private orientationFov(): number {
-    return this.aspect() < 1 ? 58 : 46;
+    return this.aspect() < 1 ? 60 : 46;
   }
 
   // ---- ユーザーカメラ操作（契約07項目1: ピンチズーム / スワイプ軌道回転） --------
@@ -1597,16 +1665,21 @@ export class TableScene {
     const el = this.renderer.domElement as HTMLElement;
     el.style.touchAction = 'none'; // ピンチでページ全体がズームしないように（E5）
 
-    const orbitFromDelta = (dx: number, dy: number): void => {
+    // 首振り（契約17項目7）: ドラッグでヨー・ピッチを回す。指を動かした向きに視界がついてくる
+    // （右ドラッグ=右を見る / 下ドラッグ=下を見る）ミラー操作。視点位置は自席に固定。
+    const lookFromDelta = (dx: number, dy: number): void => {
       this.ensureUserControl();
-      this.orbitYaw -= dx * ORBIT_YAW_SENS;
-      this.orbitPitch = clamp(this.orbitPitch - dy * ORBIT_PITCH_SENS, MIN_ORBIT_PITCH, MAX_ORBIT_PITCH);
-      this.applyOrbit();
+      this.lookYaw += dx * LOOK_YAW_SENS;
+      this.lookPitch = clamp(this.lookPitch - dy * LOOK_PITCH_SENS, MIN_PITCH, MAX_PITCH);
+      this.applyLook();
     };
+    // ズーム（契約17項目7）: ピンチ/ホイールで画角を増減（factor<1 で寄り＝FOV縮小）。
     const zoomBy = (factor: number): void => {
       this.ensureUserControl();
-      this.orbitRadius = clamp(this.orbitRadius * factor, MIN_ORBIT_R, MAX_ORBIT_R);
-      this.applyOrbit();
+      this.lookFov = clamp(this.lookFov * factor, MIN_FOV, MAX_FOV);
+      this.camera.fov = this.lookFov;
+      this.camera.updateProjectionMatrix();
+      this.wake();
     };
 
     this.onCamPointerDown = (e: PointerEvent): void => {
@@ -1645,8 +1718,8 @@ export class TableScene {
         if (this.pinchDist > 0 && d > 0) zoomBy(this.pinchDist / d);
         this.pinchDist = d;
       } else {
-        // スワイプ（1本指 / マウスドラッグ）: 方位・仰角のオービット。
-        orbitFromDelta(nx - prev.x, ny - prev.y);
+        // スワイプ（1本指 / マウスドラッグ）: ヨー・ピッチの首振り。
+        lookFromDelta(nx - prev.x, ny - prev.y);
       }
       e.preventDefault();
     };
@@ -1706,9 +1779,9 @@ export class TableScene {
         pos: this.camera.position.toArray(),
         posGoal: this.camPosGoal.toArray(),
         target: this.camTargetGoal.toArray(),
-        radius: this.orbitRadius,
-        yaw: this.orbitYaw,
-        pitch: this.orbitPitch,
+        fov: this.lookFov,
+        yaw: this.lookYaw,
+        pitch: this.lookPitch,
         user: this.userControlled,
         labels,
       };
@@ -1796,31 +1869,32 @@ export class TableScene {
     return Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y);
   }
 
-  /** 初回のユーザー操作で、現在の見た目のカメラ姿勢からオービット状態を取り込む（滑らかな引き継ぎ）。 */
+  /** 初回のユーザー操作で、現在の見た目の視線方向から首振り角を取り込む（滑らかな引き継ぎ）。 */
   private ensureUserControl(): void {
     if (this.userControlled) return;
     this.userControlled = true;
-    const off = TMP_A.subVectors(this.camPos, this.camTarget);
-    const r = off.length() || 7.4;
-    this.orbitRadius = clamp(r, MIN_ORBIT_R, MAX_ORBIT_R);
-    this.orbitPitch = clamp(Math.asin(clamp(off.y / r, -1, 1)), MIN_ORBIT_PITCH, MAX_ORBIT_PITCH);
-    this.orbitYaw = Math.atan2(off.z, off.x);
-    this.orbitTarget.copy(this.camTarget);
+    // 現在の視点位置を目線として固定し、現在の視線方向からヨー/ピッチを起こす。
+    this.camPosGoal.copy(this.camPos);
+    const off = TMP_A.subVectors(this.camTarget, this.camPos);
+    if (off.lengthSq() > 1e-6) {
+      this.lookYaw = Math.atan2(off.z, off.x);
+      this.lookPitch = clamp(Math.atan2(off.y, Math.hypot(off.x, off.z)), MIN_PITCH, MAX_PITCH);
+    }
+    this.lookFov = this.camera.fov;
   }
 
-  /** オービット状態（半径・方位・仰角・注視点）からカメラ目標を更新する。loop が滑らかに追従する。 */
-  private applyOrbit(): void {
-    const cosP = Math.cos(this.orbitPitch);
-    this.camPosGoal.set(
-      this.orbitTarget.x + this.orbitRadius * cosP * Math.cos(this.orbitYaw),
-      this.orbitTarget.y + this.orbitRadius * Math.sin(this.orbitPitch),
-      this.orbitTarget.z + this.orbitRadius * cosP * Math.sin(this.orbitYaw),
-    );
-    this.camTargetGoal.copy(this.orbitTarget);
+  /** 首振り角（ヨー/ピッチ）から注視点目標を更新する。視点位置は camPosGol 固定。loop が滑らかに追従する。 */
+  private applyLook(): void {
+    const cosP = Math.cos(this.lookPitch);
+    const fx = cosP * Math.cos(this.lookYaw);
+    const fy = Math.sin(this.lookPitch);
+    const fz = cosP * Math.sin(this.lookYaw);
+    // 注視点 = 目線位置 + 前方単位ベクトル（lookAt は方向のみ使うので距離は 1 で十分）。
+    this.camTargetGoal.set(this.camPosGoal.x + fx, this.camPosGoal.y + fy, this.camPosGoal.z + fz);
     this.wake();
   }
 
-  /** 自席の既定視点へ戻す（HUDのリセットボタンから呼ぶ・契約07項目1）。 */
+  /** 自席の既定視点へ戻す（HUDのリセットボタンから呼ぶ・契約17項目7）。 */
   resetView(): void {
     this.userControlled = false;
     this.pointers.clear();
@@ -1953,11 +2027,28 @@ export class TableScene {
     // パーティクル
     if (this.particles.update(dt)) fxBusy = true;
 
-    // 手番席の光だまり（Q15: 存在感強化）: spotTarget に追従し、ゆるく脈動する暖色の床グロー。
+    // 手番の光だまり（契約17項目2）: spotTarget（現手番席の前）に追従し、ゆるく脈動する金色の床グロー
+    // ＋細い金環。自席の手番ではほぼ非表示まで落とす（自分の番は 2D 手札・手番バナーで示す）。
+    // 表示/非表示はフェードで切替え、手番交代で「白い円」がパッと出入りしないようにする。
     {
       this.spotGlow.position.set(this.spotTarget.x, TABLE_TOP_Y + 0.021, this.spotTarget.z);
-      const gm = this.spotGlow.material as THREE.MeshBasicMaterial;
-      gm.opacity = 0.16 + 0.06 * (0.5 + 0.5 * Math.sin(now * 0.0022));
+      this.spotRing.position.set(this.spotTarget.x, TABLE_TOP_Y + 0.022, this.spotTarget.z);
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.0024);
+      const targetOp = this.activeSeatSelf ? 0.05 : 0.26 + 0.08 * pulse;
+      const ko = Math.min(1, k * 1.2);
+      if (Math.abs(this.spotGlowOp - targetOp) > 0.002) {
+        this.spotGlowOp += (targetOp - this.spotGlowOp) * ko;
+        fxBusy = true;
+      } else {
+        this.spotGlowOp = targetOp;
+      }
+      (this.spotGlow.material as THREE.MeshBasicMaterial).opacity = this.spotGlowOp;
+      // 金環は光だまりより控えめ＆自席ではほぼ消す。輪郭のパルスで手番マーカーだと分かる。
+      (this.spotRing.material as THREE.MeshBasicMaterial).opacity = this.activeSeatSelf
+        ? this.spotGlowOp * 0.4
+        : (0.4 + 0.25 * pulse) * Math.min(1, this.spotGlowOp / 0.26);
+      const ringScale = 1 + 0.05 * pulse;
+      this.spotRing.scale.setScalar(ringScale);
     }
 
     // 鳴きウィンドウ開始のハイライト（Q11）: 対象の捨て札上で脈動するリング。
@@ -2008,9 +2099,11 @@ export class TableScene {
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h);
     this.camera.aspect = this.aspect();
-    // 縦横切替（回転）に追従して画角を更新する。userControlled 中でも適用し、縦画面で卓が
-    // 見切れる/横画面で寄りすぎるのを防ぐ（項目14）。オービットの位置・注視点は保持する。
-    this.camera.fov = this.orientationFov();
+    // 縦横切替（回転）に追従して画角を更新する（E7）。未操作なら既定画角へ、ユーザーがズーム中は
+    // その画角を保持したまま範囲だけ再クランプする。首振りの視点位置・向きは保持する。
+    if (!this.userControlled) this.lookFov = this.orientationFov();
+    else this.lookFov = clamp(this.lookFov, MIN_FOV, MAX_FOV);
+    this.camera.fov = this.lookFov;
     this.camera.updateProjectionMatrix();
     this.postfx?.setSize(w, h, this.renderer.getPixelRatio());
     this.particles.setScale(this.particleScale());

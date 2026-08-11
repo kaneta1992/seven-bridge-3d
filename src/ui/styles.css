@@ -1,13 +1,18 @@
 :root {
-  --bg: #0a1018;
-  --panel: rgba(14, 22, 33, 0.82);
-  --panel-solid: #101a26;
-  --border: rgba(120, 160, 210, 0.28);
+  /* インゲームHUD（契約17項目5）: タイトルの NieR 風「生成り×墨・細罫線・抑制的ホバー」を、
+     3D の暖色の部屋の上でも視認性を保つよう暗い暖色（墨紙の反転）へ翻案した統一パレット。
+     機能色（スート4色・手番の金・成功緑・危険赤）は視認性のため保持する。 */
+  --bg: #0d0b08;
+  --panel: rgba(22, 18, 13, 0.84); /* 墨に寄せた暖色ダークのパネル地 */
+  --panel-solid: #17130d;
+  --border: rgba(214, 197, 166, 0.26); /* 生成り寄りの細罫線（暖色 hairline） */
+  --border-strong: rgba(214, 197, 166, 0.5);
   --accent: #2f9e6a;
   --accent-2: #d8a13a;
   --danger: #c0392b;
-  --text: #eef3fa;
-  --muted: #9fb2c8;
+  --text: #efe7d6; /* 生成り寄りの本文色（墨紙の反転） */
+  --muted: #a99f8c;
+  --radius: 4px; /* NieR 風の抑えた角丸（角のとがったミニマル） */
   --gap: 10px;
   color-scheme: dark;
 }
@@ -56,47 +61,31 @@ body {
   pointer-events: auto;
 }
 
+/* 汎用ボタン（契約17項目5）: 光沢グラデ/波紋/持ち上げを廃し、細罫線 + 平坦な暖色ダーク地 +
+   字間 + 抑制的ホバー（枠と地の僅かな明化）に統一。押下のヘコみだけタッチ手応えとして残す。
+   重要ボタン（primary=開始/gold=捨てる等）は機能色の塗りで視認性を確保する（E3）。 */
 button {
   font: inherit;
   color: var(--text);
-  background: linear-gradient(180deg, #22405b, #16283a);
+  background: rgba(38, 32, 23, 0.72);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 12px 16px;
   min-height: 46px;
   cursor: pointer;
   position: relative;
-  overflow: hidden;
-  transition: transform 0.11s cubic-bezier(0.2, 0.8, 0.3, 1.4), filter 0.12s ease,
-    box-shadow 0.16s ease;
+  letter-spacing: 0.04em;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease, transform 0.1s ease;
 }
-/* マイクロインタラクション: hover で僅かに持ち上げ発光、press でヘコむ */
 @media (hover: hover) {
   button:hover:not(:disabled) {
-    transform: translateY(-1px);
-    filter: brightness(1.12);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+    background: rgba(58, 49, 35, 0.85);
+    border-color: var(--border-strong);
   }
 }
 button:active:not(:disabled) {
-  transform: translateY(1px) scale(0.97);
+  transform: scale(0.98);
   filter: brightness(0.95);
-}
-/* press 時に広がる光の波紋 */
-button::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.45), transparent 60%);
-  opacity: 0;
-  transform: scale(0.2);
-  transition: opacity 0.4s ease, transform 0.4s ease;
-  pointer-events: none;
-}
-button:active:not(:disabled)::after {
-  opacity: 0.35;
-  transform: scale(1);
-  transition: none;
 }
 button.icon {
   padding: 8px 12px;
@@ -107,18 +96,32 @@ button:disabled {
   cursor: not-allowed;
 }
 button.primary {
-  background: linear-gradient(180deg, #37b97e, #1f7a4d);
-  border-color: rgba(120, 240, 180, 0.4);
+  background: rgba(47, 158, 106, 0.9);
+  border-color: rgba(120, 240, 180, 0.55);
+  color: #06130c;
   font-weight: 700;
 }
+@media (hover: hover) {
+  button.primary:hover:not(:disabled) {
+    background: rgba(60, 185, 126, 0.96);
+    border-color: rgba(120, 240, 180, 0.7);
+  }
+}
 button.gold {
-  background: linear-gradient(180deg, #e7b955, #c4901f);
-  border-color: rgba(255, 230, 160, 0.5);
+  background: rgba(216, 161, 58, 0.94);
+  border-color: rgba(255, 230, 160, 0.6);
   color: #201603;
   font-weight: 700;
 }
+@media (hover: hover) {
+  button.gold:hover:not(:disabled) {
+    background: rgba(231, 185, 85, 0.98);
+  }
+}
 button.danger {
-  background: linear-gradient(180deg, #d5533f, #a12b1c);
+  background: rgba(192, 57, 43, 0.92);
+  border-color: rgba(255, 150, 130, 0.45);
+  color: #fff;
 }
 
 /* ---- 上部 HUD ---- */
@@ -135,13 +138,16 @@ button.danger {
 .topbar .turn {
   font-weight: 700;
   font-size: 16px;
+  letter-spacing: 0.06em;
 }
+/* ピルは丸型をやめ、細罫線の角ばったタグ（NieR 風）に統一（項目5）。 */
 .topbar .pill {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(214, 197, 166, 0.06);
   border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 5px 12px;
+  border-radius: 2px;
+  padding: 5px 11px;
   font-size: 13px;
+  letter-spacing: 0.04em;
   color: var(--muted);
 }
 .topbar .spacer {
@@ -181,9 +187,10 @@ button.danger {
 .meldtoggle {
   min-height: 34px;
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: 2px;
   font-size: 13px;
   font-weight: 700;
+  letter-spacing: 0.04em;
   display: inline-flex;
   gap: 8px;
   align-items: center;
@@ -196,7 +203,7 @@ button.danger {
 .melds {
   margin: 0;
   padding: 8px;
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--panel);
   border: 1px solid var(--border);
   backdrop-filter: blur(6px);
@@ -215,7 +222,7 @@ button.danger {
   display: flex;
   gap: 3px;
   padding: 6px;
-  border-radius: 10px;
+  border-radius: 3px;
   background: var(--panel);
   border: 1px solid var(--border);
 }
@@ -285,7 +292,7 @@ button.danger {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-  background: linear-gradient(0deg, rgba(6, 10, 15, 0.92), rgba(6, 10, 15, 0));
+  background: linear-gradient(0deg, rgba(10, 8, 5, 0.92), rgba(10, 8, 5, 0));
   pointer-events: auto;
 }
 .footer {
@@ -385,7 +392,7 @@ button.danger {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(4, 8, 12, 0.7);
+  background: rgba(8, 6, 4, 0.72);
   backdrop-filter: blur(4px);
   padding: 16px;
   animation: fade-in 0.2s ease;
@@ -398,16 +405,31 @@ button.danger {
     opacity: 1;
   }
 }
+/* モーダル（契約17項目5）: 角を抑えた墨紙パネル + 細罫線 + 内枠 outline（NieR 風二重罫）。
+   スクロールバーは控えめな暖色 hairline に。タイトルのパネル言語と揃える。 */
 .modal {
   background: var(--panel-solid);
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 6px;
+  outline: 1px solid rgba(214, 197, 166, 0.14);
+  outline-offset: -6px;
   padding: 22px;
   width: min(720px, 96vw);
   max-height: 92vh;
   overflow: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   animation: modal-in 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(214, 197, 166, 0.34) transparent;
+}
+.modal::-webkit-scrollbar {
+  width: 8px;
+}
+.modal::-webkit-scrollbar-thumb {
+  background: rgba(214, 197, 166, 0.28);
+  border-radius: 2px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 @keyframes modal-in {
   from {
@@ -445,9 +467,9 @@ input[type="number"],
 select {
   font: inherit;
   color: var(--text);
-  background: #0b1420;
+  background: rgba(12, 10, 7, 0.7);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 10px 12px;
   min-height: 44px;
 }
@@ -468,8 +490,9 @@ select:focus {
   padding: 8px 12px;
 }
 .seg button.on {
-  background: linear-gradient(180deg, #37b97e, #1f7a4d);
-  border-color: rgba(120, 240, 180, 0.5);
+  background: rgba(47, 158, 106, 0.9);
+  border-color: rgba(120, 240, 180, 0.6);
+  color: #06130c;
 }
 
 /* スコア票 */
@@ -533,7 +556,9 @@ table.score td.win {
   z-index: 15;
   background: var(--panel-solid);
   border: 1px solid var(--accent-2);
-  border-radius: 16px;
+  border-radius: 6px;
+  outline: 1px solid rgba(216, 161, 58, 0.28);
+  outline-offset: -5px;
   padding: 16px 18px;
   min-width: min(360px, 92vw);
   text-align: center;
@@ -608,8 +633,9 @@ table.score td.win {
   background: var(--danger);
   color: #fff;
   padding: 10px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   font-size: 14px;
+  letter-spacing: 0.03em;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
   opacity: 0;
   transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.2, 0.9, 0.3, 1.3);
@@ -782,13 +808,14 @@ table.score td.win {
   left: 50%;
   top: 22%;
   transform: translate(-50%, -18px);
-  padding: 10px 26px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(38, 64, 91, 0.96), rgba(16, 26, 38, 0.96));
-  border: 1px solid rgba(150, 200, 255, 0.4);
+  padding: 10px 28px;
+  border-radius: 3px;
+  background: rgba(22, 18, 13, 0.94);
+  border: 1px solid var(--border-strong);
   color: var(--text);
   font-weight: 800;
   font-size: clamp(16px, 4.5vw, 22px);
+  letter-spacing: 0.08em;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
   opacity: 0;
   pointer-events: none;
@@ -1107,24 +1134,38 @@ table.score td.win {
   background: radial-gradient(120% 95% at 50% 42%, rgba(8, 10, 8, 0.18), rgba(5, 7, 6, 0.62) 100%);
   backdrop-filter: none;
 }
-/* 生成りの紙パネル。角を抑え、細い墨の内枠（NieR風の二重罫）で囲う。 */
+/* 生成りの紙パネル。角を抑え、細い墨の内枠（NieR風の二重罫）で囲う。
+   高さが画面を超える場合はパネル内スクロール（項目1）。内枠は outline（-offset）で描くため
+   スクロールしても枠が流れず固定される。スクロールバーは紙テーマに馴染む控えめな見た目にする。 */
 .title-screen .modal.lobby {
   background: linear-gradient(180deg, rgba(217, 211, 196, 0.94), rgba(205, 199, 183, 0.92));
   color: var(--ink);
   border: 1px solid var(--hair);
   border-radius: 3px;
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.62);
-  overflow: visible;
+  outline: 1px solid rgba(35, 32, 26, 0.22); /* NieR 風の二重罫（内枠）。スクロールで流れない */
+  outline-offset: -7px;
+  max-height: 92vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin; /* Firefox: 控えめな細スクロールバー */
+  scrollbar-color: rgba(35, 32, 26, 0.4) transparent;
 }
 .title-screen .modal.lobby::before {
-  content: '';
-  position: absolute;
-  inset: 6px;
-  height: auto;
-  background: none;
-  border: 1px solid rgba(35, 32, 26, 0.22);
-  border-radius: 1px;
-  pointer-events: none;
+  display: none; /* 内枠は outline へ移行（スクロール時に枠が流れないように） */
+}
+.title-screen .modal.lobby::-webkit-scrollbar {
+  width: 8px;
+}
+.title-screen .modal.lobby::-webkit-scrollbar-thumb {
+  background: rgba(35, 32, 26, 0.32);
+  border-radius: 2px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.title-screen .modal.lobby::-webkit-scrollbar-thumb:hover {
+  background: rgba(35, 32, 26, 0.5);
+  background-clip: padding-box;
 }
 /* ブランド: マークは細い墨の四角枠、タイトルは彩度を抑えた墨色で字間を広げる。 */
 .title-screen .lobby-brand {
@@ -1230,6 +1271,22 @@ table.score td.win {
   background: var(--ink);
   color: var(--paper);
   border-color: var(--ink);
+}
+/* フィールド内セグメント/トグル（ルーム作成の「ラウンド数」「公開ルームにする」等・項目4）を、
+   タブ帯と同じ「細罫線の枠に収めた墨セグメント」に揃える。createForm の見た目をタイトルの
+   デザイン言語へ統一する（各ボタンは枠内で罫線なし→選択時のみ墨で反転）。 */
+.title-screen .field .seg {
+  border: 1px solid var(--hair);
+  border-radius: 2px;
+  padding: 3px;
+  gap: 3px;
+}
+.title-screen .field .seg button {
+  border-color: transparent;
+  border-radius: 1px;
+}
+.title-screen .field .seg.names {
+  padding: 4px;
 }
 /* 入力: 下罫線だけの極薄フィールド。 */
 .title-screen input[type="text"] {
