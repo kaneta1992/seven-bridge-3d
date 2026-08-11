@@ -10,12 +10,6 @@ export interface Meld {
   readonly owner: string;
   kind: MeldKind;
   cards: Card[];
-  /**
-   * 単独7の成長方向。lone7 のみ意味を持つ:
-   * undefined=未確定 / 'sequence'=シークェンス化確定 / 'group'=グループ化確定。
-   * 確定後は逆方向を拒否する（要件 §2.2）。
-   */
-  determined?: 'sequence' | 'group';
 }
 
 /**
@@ -101,41 +95,19 @@ export function canAttach(meld: Meld, card: Card): boolean {
       return !suitPresent(meld.cards, card.suit); // スート重複なし
     }
     case 'lone7': {
+      // 単独7の成長は同スート隣接(6/8)によるシークェンス化のみ（要件§2.2）。
+      // 他スート7でのグループ化経路は廃止した（単独7へ7は付かない）。
       const seven = meld.cards[0]!; // 起点の7（同スート判定に使用）
-      if (meld.determined === undefined) {
-        // 未確定: 同スート隣接(6/8)→シークェンス化 / 他スート7→グループ化
-        if (card.suit === seven.suit && (card.rank === 6 || card.rank === 8)) return true;
-        if (card.rank === 7 && card.suit !== seven.suit) return true;
-        return false;
-      }
-      if (meld.determined === 'sequence') {
-        if (card.suit !== seven.suit) return false;
-        return isConsecutiveRun([...meld.cards.map((c) => c.rank), card.rank]);
-      }
-      // determined === 'group'
-      if (card.rank !== 7) return false;
-      if (meld.cards.length >= 4) return false;
-      return !suitPresent(meld.cards, card.suit);
+      return card.suit === seven.suit && (card.rank === 6 || card.rank === 8);
     }
   }
 }
 
 /** 付け札を適用した新しいメルドを返す（canAttach が真である前提）。元メルドは不変。 */
 export function attachResult(meld: Meld, card: Card): Meld {
-  // 付けるカードは防御コピーする（呼び出し側の参照を新メルドへ共有しない・publishMeld/鳴きと整合・項目8）。
+  // 付けるカードは防御コピーする（呼び出し側の参照を新メルドへ共有しない・publishMeld/鳴きと整合）。
   const cards = [...meld.cards, { ...card }];
-  let kind: MeldKind = meld.kind;
-  let determined = meld.determined;
-
-  if (meld.kind === 'lone7' && determined === undefined) {
-    determined = card.rank === 7 ? 'group' : 'sequence';
-  }
-  // 表示・後続判定のため、確定した lone7 は実体の種類へ昇格させる
-  if (meld.kind === 'lone7' && determined !== undefined) {
-    kind = determined;
-  }
-
-  const next: Meld = { id: meld.id, owner: meld.owner, kind, cards };
-  if (determined !== undefined && kind === 'lone7') next.determined = determined;
-  return next;
+  // 単独7へ同スート6/8が付いたらシークェンスへ昇格する（唯一の成長経路・要件§2.2）。
+  const kind: MeldKind = meld.kind === 'lone7' ? 'sequence' : meld.kind;
+  return { id: meld.id, owner: meld.owner, kind, cards };
 }

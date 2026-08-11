@@ -14,6 +14,7 @@ declare module 'three' {
   export class BufferAttribute { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Float32BufferAttribute { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class RingGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class BoxGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Plane { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Sprite { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class SpriteMaterial { [k: string]: AnyX; constructor(...a: AnyX[]); }
@@ -27,6 +28,8 @@ declare module 'three' {
   export const AdditiveBlending: AnyX;
   export const NormalBlending: AnyX;
   export const DoubleSide: AnyX;
+  export const BackSide: AnyX;
+  export const FrontSide: AnyX;
   export const EquirectangularReflectionMapping: AnyX;
 }
 

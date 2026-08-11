@@ -72,6 +72,10 @@ export class GameUI {
   private bottomEl: HTMLElement | null = null;
   private handEl: HTMLElement | null = null;
   private footerEl: HTMLElement | null = null; // hint + actions（毎 render 作り直し可）
+  // 永続コントロール（スコア票/ミュート/視点リセット）。overlay とは別コンテナに保持し renderHud の
+  // clear(overlay) で破棄されないようにする（項目8: 毎 render のボタン作り直しでタップが取りこぼされる
+  // 不具合の解消）。ボタンとハンドラは beginWithDriver で一度だけ生成し、以後 DOM を作り直さない。
+  private controlsEl: HTMLElement | null = null;
   private cardEls = new Map<string, HTMLElement>(); // cardId -> 永続カード要素
   private handCards: { id: string; el: HTMLElement }[] = [];
   private focusedId: string | null = null;
@@ -245,6 +249,7 @@ export class GameUI {
     this.bottomEl = null;
     this.handEl = null;
     this.footerEl = null;
+    this.controlsEl = null;
     this.cardEls.clear();
     this.handCards = [];
     this.focusedId = null;
@@ -404,12 +409,14 @@ export class GameUI {
     this.bottomEl = el('div', { class: 'bottom' }, [this.handEl, this.footerEl]);
     this.toastEl = el('div', { class: 'toast' });
     this.vignetteEl = el('div', { class: 'vignette' }); // 画面周縁を落とす映画的ビネット（3D品質）
-    this.root.append(this.sceneHost, this.vignetteEl, this.overlay, this.bottomEl, this.toastEl);
+    this.controlsEl = el('div', { class: 'controls' }); // 永続コントロール（項目8）
+    this.root.append(this.sceneHost, this.vignetteEl, this.overlay, this.controlsEl, this.bottomEl, this.toastEl);
     this.attachHandContainer(this.handEl);
 
     // SFX とコールアウト層。コールアウトは overlay とは別に root 直下へ（最前面・pointer 透過）。
     this.audio = new AudioKit();
     this.callouts = new Callouts(this.root);
+    this.buildControls(); // 永続ボタン群を一度だけ生成（audio 生成後にミュート状態を反映）
 
     this.scene = new TableScene(this.sceneHost);
     this.driver = driver;
@@ -589,6 +596,8 @@ export class GameUI {
   // overlay（上部HUD・メルド・鳴き・モーダル）のみを作り直す。手札は永続コンテナで別管理（項目3）。
   private renderHud(view: PlayerView): void {
     clear(this.overlay);
+    // 永続コントロールはゲーム終了の結果画面では隠す（結果画面が全面を占めるため）。
+    if (this.controlsEl) this.controlsEl.style.display = view.phase === 'gameOver' ? 'none' : '';
     if (view.phase === 'gameOver') {
       this.overlay.append(this.buildResult(view));
       return;
@@ -606,17 +615,20 @@ export class GameUI {
     }
   }
 
-  private buildTopbar(view: PlayerView): HTMLElement {
-    const current = view.seats.find((s) => s.isCurrent);
-    // 鳴き受付中の表示は「鳴ける本人」にのみ出す。非対象者は通常の手番待ち表示のまま（項目3・秘匿）。
-    const turnText =
-      view.phase === 'meldWindow' && this.amClaimant(view)
-        ? '鳴き受付中…'
-        : view.phase === 'awaitingStart'
-          ? '配札待ち…'
-          : `${current?.name ?? '-'} さんの手番`;
+  // 永続コントロール（スコア票/ミュート/視点リセット）を一度だけ構築する（項目8）。overlay の
+  // 作り直し（renderHud）から独立した controlsEl 内に置くため、ボタン要素とハンドラは全 render を
+  // 通じて同一のまま生き続ける＝タップ/クリックが render のタイミングで取りこぼされない。
+  private buildControls(): void {
+    const host = this.controlsEl;
+    if (!host) return;
+    clear(host);
+    // スコア票: 常に最新ビューで開く（openScoreModal を this.currentView() で呼ぶため、HUD を
+    // 作り直さなくても表示内容は最新になる）。
     const scoreBtn = el('button', { text: 'スコア票' });
-    scoreBtn.onclick = () => this.openScoreModal(view);
+    scoreBtn.onclick = () => {
+      this.audio?.click();
+      this.openScoreModal(this.currentView());
+    };
     const muteBtn = el('button', {
       class: 'icon',
       text: this.audio?.isMuted() ? '🔇' : '🔊',
@@ -627,24 +639,30 @@ export class GameUI {
       muteBtn.textContent = m ? '🔇' : '🔊';
     };
     // 視点リセット（契約07項目1）: ピンチ/スワイプで動かしたカメラを自席の既定視点へ戻す。
-    // 回転して自分の向きを見失っても一押しで復帰できる（E5: 自席方向の手掛かり）。
-    const resetBtn = el('button', {
-      class: 'icon',
-      text: '🎯',
-      title: '視点を自席へ戻す',
-    });
+    const resetBtn = el('button', { class: 'icon', text: '🎯', title: '視点を自席へ戻す' });
     resetBtn.onclick = () => {
       this.scene?.resetView();
       this.audio?.click();
     };
+    host.append(resetBtn, muteBtn, scoreBtn);
+  }
+
+  private buildTopbar(view: PlayerView): HTMLElement {
+    const current = view.seats.find((s) => s.isCurrent);
+    // 鳴き受付中の表示は「鳴ける本人」にのみ出す。非対象者は通常の手番待ち表示のまま（項目3・秘匿）。
+    const turnText =
+      view.phase === 'meldWindow' && this.amClaimant(view)
+        ? '鳴き受付中…'
+        : view.phase === 'awaitingStart'
+          ? '配札待ち…'
+          : `${current?.name ?? '-'} さんの手番`;
+    // 操作ボタン群は controlsEl（永続）へ分離済み。topbar は手番表示とピルのみ。右上は controls の
+    // ためにあける（pill を左寄せ→spacer で右を空ける）。
     return el('div', { class: 'topbar' }, [
       el('span', { class: 'turn', text: turnText }),
-      el('span', { class: 'spacer' }),
       el('span', { class: 'pill', text: `ラウンド ${view.round}/${view.totalRounds}` }),
       el('span', { class: 'pill', text: `山札 ${view.deckCount}` }),
-      resetBtn,
-      muteBtn,
-      scoreBtn,
+      el('span', { class: 'spacer' }),
     ]);
   }
 
@@ -1316,6 +1334,12 @@ export class GameUI {
   }
 
   private openScoreModal(view: PlayerView): void {
+    // トグル動作: 既に開いていれば閉じるだけ（連打での多重スタックを防ぐ・2026-08-11）
+    const existing = this.root.querySelector('.center .modal .score-wrap')?.closest('.center');
+    if (existing) {
+      existing.remove();
+      return;
+    }
     const modal = el('div', { class: 'modal' }, [
       el('h1', { text: 'スコア票' }),
       el('h2', { text: `ラウンド ${view.round}/${view.totalRounds} 時点` }),

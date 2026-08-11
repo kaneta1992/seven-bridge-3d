@@ -62,40 +62,39 @@ describe('単独7とメルド公開', () => {
   });
 });
 
-describe('単独7の成長 (E2: シークェンス化/グループ化/方向確定後は逆方向拒否)', () => {
+describe('単独7の成長 (E2: 同スート6/8でのシークェンス化のみ・7の付け札は禁止・要件§2.2)', () => {
   const lone = (): Meld => ({ id: 0, owner: 'p0', kind: 'lone7', cards: [c('S', 7)] });
 
   it('同スート6/8でシークェンス化、その後は同スート連続のみ', () => {
     const m = lone();
     expect(canAttach(m, c('S', 6))).toBe(true);
     expect(canAttach(m, c('S', 8))).toBe(true);
-    const seq = attachResult(m, c('S', 6)); // -> [7,6] シークェンス確定
+    const seq = attachResult(m, c('S', 6)); // -> [7,6] シークェンス化
     expect(seq.kind).toBe('sequence');
     expect(canAttach(seq, c('S', 8))).toBe(true); // 逆端の8も連続なので可
     expect(canAttach(seq, c('S', 5))).toBe(true);
-    // 逆方向(グループ化=他スート7)は拒否
+    // 他スート7は付かない（グループ化経路の廃止）
     expect(canAttach(seq, c('H', 7))).toBe(false);
   });
 
-  it('他スート7でグループ化、その後は他スート7のみ・最大4枚', () => {
+  it('単独7へは7を付けられない（グループ化経路の廃止・要件§2.2）', () => {
     const m = lone();
-    expect(canAttach(m, c('H', 7))).toBe(true);
-    expect(canAttach(m, c('S', 7))).toBe(false); // 同スート7は不可（重複）
-    const grp = attachResult(m, c('H', 7)); // -> [S7,H7] グループ確定
-    expect(grp.kind).toBe('group');
-    expect(canAttach(grp, c('D', 7))).toBe(true);
-    // 逆方向(シークェンス化=同スート隣接)は拒否
-    expect(canAttach(grp, c('S', 6))).toBe(false);
-    const g3 = attachResult(grp, c('D', 7));
-    const g4 = attachResult(g3, c('C', 7));
-    expect(g4.cards.length).toBe(4);
-    // 4枚を超える追加は不可（7は他に存在しないが規則上も拒否）
-    expect(canAttach(g4, c('S', 7))).toBe(false);
+    // 他スート7・同スート7（重複）いずれも不可。単独7に7は決して付かない。
+    expect(canAttach(m, c('H', 7))).toBe(false);
+    expect(canAttach(m, c('D', 7))).toBe(false);
+    expect(canAttach(m, c('C', 7))).toBe(false);
+    expect(canAttach(m, c('S', 7))).toBe(false);
+    // 同スート隣接だけが成長経路。付けた結果はシークェンスであり lone7 のまま残らない。
+    const seq = attachResult(m, c('S', 8));
+    expect(seq.kind).toBe('sequence');
+    // 7のグループは通常の3枚以上公開（isValidGroup）で作る（単独7からは作れない）。
+    expect(isValidGroup([c('S', 7), c('H', 7), c('D', 7)])).toBe(true);
   });
 
-  it('未確定の7に無関係なカードは付かない', () => {
+  it('単独7に無関係なカードは付かない', () => {
     expect(canAttach(lone(), c('S', 9))).toBe(false);
-    expect(canAttach(lone(), c('H', 6))).toBe(false);
+    expect(canAttach(lone(), c('H', 6))).toBe(false); // 他スートの6も不可（同スートのみ）
+    expect(canAttach(lone(), c('H', 8))).toBe(false);
   });
 });
 

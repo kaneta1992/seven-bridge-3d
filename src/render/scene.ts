@@ -23,6 +23,8 @@ const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
 const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延）
 const MAX_RINGS = 10; // 光輪（ショックウェーブ）の同時上限（派手化で二重リングを出すため増量・契約09項目2）
 const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の中心（update と一致）
+// 山札カードの向き（卓に伏せて水平・面下）。毎フレームの Euler 生成を避け共有する。
+const DECK_QUAT = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
 const DISCARD_R = 0.62; // 捨て札ドロップ判定の半径（山札 +0.5 と干渉しない大きさ）
 const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓外＝取り消し）
 
@@ -70,8 +72,13 @@ export class TableScene {
 
   // 既知カード（面が判明: 自手札/捨て札/メルド）を cardId で管理
   private known = new Map<string, CardObj>();
-  // 匿名の裏カード（他家手札・山札）のプール
-  private backPool: CardObj[] = [];
+  // 匿名の裏カード（他家手札・山札）を安定 ID で管理する（項目3/4/6・2026-08-11 再設計）。
+  //   キー: 手札 = `h:<席>:<スロット>` / 山札 = `d:<段>`。
+  //   席や枚数が変わっても同じスロットは同一オブジェクトが追従するため、手番交代のたびに
+  //   カードが卓上を横断して「山札へ吸い込まれる」誤読を防ぐ（退場はその場フェード）。
+  private backById = new Map<string, CardObj>();
+  // 直近フレームの他家手札枚数（席index→枚数）。+1 検出で他家ツモの山札→手札飛翔を起動する（項目3）。
+  private backSeatCount = new Map<number, number>();
 
   // カメラ演出
   private camPos = new THREE.Vector3(0, 4, 6);
@@ -167,8 +174,10 @@ export class TableScene {
     this.attachContextLossHandlers();
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color('#0a1018');
-    this.scene.fog = new THREE.Fog('#080d14', 9, 22);
+    // 部屋の空間感（項目7）: 暖色の壁色をフォグ/背景に用い、囲われた家の部屋に見せる。壁メッシュが
+    // 視界を覆うため背景色は隙間の保険。フォグ遠方を壁半径に合わせ、壁が奥へ自然に溶ける。
+    this.scene.background = new THREE.Color('#1a1410');
+    this.scene.fog = new THREE.Fog('#241a12', 11, 30);
     if (this.quality.envMap) {
       this.envMap = this.buildEnvMap();
       this.scene.environment = this.envMap;
@@ -274,9 +283,11 @@ export class TableScene {
   }
 
   private buildEnvironment(): void {
-    // 3灯構成（キー+リム+フィル）+ 半球/環境光 + 手番スポット。豪華なスタジオライティング。
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.42));
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x24301f, 0.55));
+    // 3灯構成（キー+リム+フィル）+ 半球/環境光 + 手番スポット。暖色寄りの家の部屋ライティング（項目7）。
+    this.scene.add(new THREE.AmbientLight(0xfff1dc, 0.4));
+    // 半球光: 天井の暖色 ↓ 床の木色。冷たいスタジオ感を弱め室内の温かみを出す。
+    this.scene.add(new THREE.HemisphereLight(0xffe6c4, 0x3a2c1c, 0.5));
+    this.buildRoom();
 
     const key = new THREE.DirectionalLight(0xfff4e0, 1.35);
     key.position.set(3.5, 8, 4);
@@ -342,15 +353,68 @@ export class TableScene {
     rim.receiveShadow = true;
     this.scene.add(rim);
 
-    // 床（影の受け皿）
+    // 卓下の影の受け皿（部屋の床の上に敷く円盤・暖色の木調に寄せる）
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(14, 48),
-      new THREE.MeshStandardMaterial({ color: '#0c141d', roughness: 1 }),
+      new THREE.MeshStandardMaterial({ color: '#2a1d12', roughness: 1 }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = -0.45;
     floor.receiveShadow = true;
     this.scene.add(floor);
+  }
+
+  /**
+   * 家の部屋風の囲い（項目7）: 内向き（BackSide）の箱で床・壁・天井を作り、暖色の環境に見せる。
+   * 全メッシュは既定レイヤ(0)のまま＝選択的 Bloom（レイヤ1のみ黒背景抽出）には一切載らない（E3）。
+   * カード視認性を損なわないよう壁は暗めの暖色。モバイル（low ティア）では窓/据置ライトを省き軽量化。
+   */
+  private buildRoom(): void {
+    const S = 34; // 部屋の一辺
+    const H = 13; // 天井高
+    const floorY = -0.5;
+    // BoxGeometry の面順: +x, -x, +y(天井), -y(床), +z, -z。面ごとに材質を割り当てる。
+    const wall = (color: string): THREE.MeshStandardMaterial =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.96, metalness: 0, side: THREE.BackSide });
+    const wallMat = wall('#4a3a2c'); // 壁: 暖色の塗り壁/板
+    const ceilMat = wall('#2c2118'); // 天井: 暗め
+    const floorMat = new THREE.MeshStandardMaterial({ color: '#3a2a1b', roughness: 0.98, side: THREE.BackSide }); // 床板
+    const mats = [wallMat, wallMat.clone(), ceilMat, floorMat, wallMat.clone(), wallMat.clone()];
+    const room = new THREE.Mesh(new THREE.BoxGeometry(S, H, S), mats);
+    room.position.set(0, floorY + H / 2, 0);
+    room.receiveShadow = false; // 内壁は影計算に含めない（コスト削減・見た目に不要）
+    this.scene.add(room);
+
+    if (this.quality.name === 'low') return; // モバイルは壁のみで軽量化（窓/据置ライト省略）
+
+    // 窓（-z 壁に暖色の外光パネル）: 発光は MeshBasic（Bloom 非対象レイヤ0）で表現。夕方の家の窓。
+    const winW = 5.4;
+    const winH = 4.2;
+    const win = new THREE.Mesh(
+      new THREE.PlaneGeometry(winW, winH),
+      new THREE.MeshBasicMaterial({ color: '#ffcf8f' }),
+    );
+    win.position.set(-4, floorY + 4.6, -S / 2 + 0.06); // 壁のすぐ内側
+    this.scene.add(win);
+    // 窓桟（十字の暗いフレーム）で「窓」らしさを補強。
+    const frameMat = new THREE.MeshBasicMaterial({ color: '#2a1c10' });
+    const barV = new THREE.Mesh(new THREE.PlaneGeometry(0.16, winH), frameMat);
+    barV.position.set(win.position.x, win.position.y, win.position.z + 0.02);
+    this.scene.add(barV);
+    const barH = new THREE.Mesh(new THREE.PlaneGeometry(winW, 0.16), frameMat);
+    barH.position.copy(barV.position);
+    this.scene.add(barH);
+
+    // 窓からの暖色の指向性光 + 部屋の据置ランプ（点光源）。カードのキー光は既存 key に任せ、
+    // これらは環境の温かみを足すだけの弱め設定（視認性を損なわない）。
+    const windowLight = new THREE.DirectionalLight(0xffcf94, 0.35);
+    windowLight.position.set(-4, floorY + 4.6, -6);
+    windowLight.target.position.set(0, 0, 0);
+    this.scene.add(windowLight);
+    this.scene.add(windowLight.target);
+    const lamp = new THREE.PointLight(0xffb066, 14, 16, 2);
+    lamp.position.set(6.5, floorY + 5.5, 5.5);
+    this.scene.add(lamp);
   }
 
   // ---- カードメッシュ生成（共有ジオメトリ/マテリアル） --------------------
@@ -410,20 +474,32 @@ export class TableScene {
     return new THREE.Quaternion().setFromEuler(e);
   }
 
-  private handPositions(seatIndex: number, count: number): THREE.Vector3[] {
+  /**
+   * 他家手札を「人が持っているように」席の空中へ扇状で浮かせる（項目6）。卓面より高い Y に上げ、
+   * 席方向へ立てて傾けることで、卓面のメルドゾーンや伏せ札と物理的に干渉しない。手の造形は無し。
+   * 返す quat は裏面（backTexture）が卓の外側＝その席のプレイヤー側から見えない向き＝観戦者からは
+   * 裏が見える向き。扇はカード面内のロール（Z）で広げる。
+   */
+  private floatHandLayout(seatIndex: number, count: number): { pos: THREE.Vector3; quat: THREE.Quaternion }[] {
     const dir = this.seatDir(seatIndex);
     const tangent = new THREE.Vector3(-dir.z, 0, dir.x);
-    const anchor = dir.clone().multiplyScalar(SEAT_R - 0.15);
-    const out: THREE.Vector3[] = [];
+    const a = this.seatAngle(seatIndex);
+    const height = TABLE_TOP_Y + 0.98; // 卓面から浮かせる高さ（メルド・伏せ札と非干渉）
+    const anchor = dir.clone().multiplyScalar(SEAT_R + 0.05).setY(height);
+    // 枚数が増えても幅が暴走しないよう間隔を詰める（扇の総幅を一定に保つ）。
+    const spacing = count > 1 ? Math.min(HAND_SPACING, 2.6 / (count - 1)) : 0;
+    const tilt = 1.12; // 卓面（-π/2）から立てる角度。カードを手前に起こして持ち手風に。
+    const out: { pos: THREE.Vector3; quat: THREE.Quaternion }[] = [];
     for (let k = 0; k < count; k++) {
       const t = k - (count - 1) / 2;
+      const roll = t * 0.12; // 面内ロールで扇状に広げる
       const p = anchor
         .clone()
-        .addScaledVector(tangent, t * HAND_SPACING)
-        .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.04 + k * 0.004, 0))
-        // 手前ほど中心から少し離す（扇の膨らみ）
-        .addScaledVector(dir, -Math.abs(t) * 0.03);
-      out.push(p);
+        .addScaledVector(tangent, t * spacing)
+        .add(new THREE.Vector3(0, -Math.abs(t) * 0.02, 0)) // 端ほど僅かに下げ弧を描く
+        .addScaledVector(dir, Math.abs(t) * 0.02); // 端ほど僅かに外へ膨らむ
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2 + tilt, -a + Math.PI / 2, roll, 'YXZ'));
+      out.push({ pos: p, quat: q });
     }
     return out;
   }
@@ -502,20 +578,42 @@ export class TableScene {
       }
     }
 
-    // 3) 捨て札（面表示・中央やや左に散らし、決定的ジッタ）。山札(+x)と近接しつつ重ならないよう
-    //    ジッタ幅を控えめにする（改善R3 項目1・2）。
-    const discardStart = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0);
+    // 3) 捨て札（面表示・中央やや左）。「何が捨てられたか一目で分かる」ことを最優先に、
+    //    直近 DISCARD_WINDOW 枚を重なり控えめのグリッドで面出しする（項目5）。古い札はアンカーへ
+    //    小さくまとめ（下に潜る）、新しい札ほど手前・上に積む。中央保護ゾーンとメルドゾーンへは
+    //    侵入しない範囲に収める（E8: 大量枚数でも卓外・中央へはみ出さない）。
+    const total = view.discardPile.length;
+    const DISCARD_WINDOW = 15; // 面出しで読める窓（超過分はアンカーへ埋没）
+    const COLS = 5;
+    const DX = 0.3; // 列間隔（部分的に重なり上部の位数字が見える）
+    const DZ = 0.4; // 行間隔
     view.discardPile.forEach((card, k) => {
       const id = cardId(card);
       desired.add(id);
-      const jx = (hashId(id) % 100) / 100 - 0.5;
-      const jz = (((hashId(id) / 7) | 0) % 100) / 100 - 0.5;
-      const p = discardStart
-        .clone()
-        .add(new THREE.Vector3(jx * 0.28, TABLE_TOP_Y + 0.03 + k * 0.008, jz * 0.28));
-      const q = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(-Math.PI / 2, jx * 0.6, 0, 'YXZ'),
-      );
+      const fromEnd = total - 1 - k; // 0 = 最新
+      let p: THREE.Vector3;
+      let yaw: number;
+      if (fromEnd >= DISCARD_WINDOW) {
+        // 埋没スタック（古い札）: アンカーに小ジッタで積む（読めなくてよい）。
+        const jx = (hashId(id) % 100) / 100 - 0.5;
+        const jz = (((hashId(id) / 7) | 0) % 100) / 100 - 0.5;
+        p = DISCARD_C.clone().add(new THREE.Vector3(jx * 0.16, TABLE_TOP_Y + 0.02 + (k % 6) * 0.006, jz * 0.16));
+        yaw = jx * 0.5;
+      } else {
+        // 面出しグリッド: 古い可視札から順に格子へ並べ、最新を最前面（高い y）に置く。
+        const j = DISCARD_WINDOW - 1 - fromEnd; // 0..WINDOW-1（可視札内で古い順）
+        const col = j % COLS;
+        const rowIdx = Math.floor(j / COLS);
+        p = DISCARD_C.clone().add(
+          new THREE.Vector3(
+            (col - (COLS - 1) / 2) * DX,
+            TABLE_TOP_Y + 0.06 + j * 0.004, // 新しい札ほど僅かに上＝重なり順で最前面
+            (rowIdx - 0.6) * DZ,
+          ),
+        );
+        yaw = 0;
+      }
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, yaw, 0, 'YXZ'));
       this.place(id, card, p, q, now, 0, deckPos);
     });
 
@@ -527,26 +625,11 @@ export class TableScene {
       }
     }
 
-    // 4) 他家手札（匿名裏カード）+ 5) 山札（裏カードのスタック）
-    const backTargets: { pos: THREE.Vector3; quat: THREE.Quaternion }[] = [];
-    view.seats.forEach((seat) => {
-      if (seat.index === view.youIndex) return;
-      const pos = this.handPositions(seat.index, seat.handCount);
-      pos.forEach((p, k) => {
-        const fan = (k - (seat.handCount - 1) / 2) * 0.05;
-        backTargets.push({ pos: p, quat: this.flatQuat(seat.index, fan, false) });
-      });
-    });
-    const deckShown = Math.min(view.deckCount, 14);
-    for (let i = 0; i < deckShown; i++) {
-      backTargets.push({
-        pos: new THREE.Vector3(0.5, TABLE_TOP_Y + 0.03 + i * 0.02, 0),
-        quat: new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0)),
-      });
-    }
+    // 4) 他家手札（空中の浮遊扇）+ 5) 山札（実枚数連動スタック）。安定 ID 管理で退場はその場フェード、
+    //    他家ツモは山札→手札の飛翔になる（項目3/4/6）。
     const dealing = this.freshDeal;
     this.freshDeal = false;
-    this.syncBackPool(backTargets, now, dealing, deckPos);
+    this.syncBacks(view, now, dealing, deckPos);
 
     // カメラを現手番（=youIndex）席の背後へ演出移動。ただしユーザーが視点を操作中は勝手に戻さない
     // （契約07項目1: リセットはユーザー操作で。ラウンド切替=clearCards で自動的に既定へ復帰する）。
@@ -642,6 +725,9 @@ export class TableScene {
         color,
         transparent: true,
         opacity: 0,
+        // depthTest=false + 高い renderOrder で、卓上のカードや積み札に隠れず常に最前面へ描く
+        // （項目2: ドラッグ開始時に全ドロップ先が確実に見える）。加算合成なので白飛びはしない。
+        depthTest: false,
         depthWrite: false,
         side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending,
@@ -649,7 +735,7 @@ export class TableScene {
       const m = new THREE.Mesh(geo, mat);
       m.rotation.x = -Math.PI / 2;
       m.position.y = TABLE_TOP_Y + 0.06;
-      m.renderOrder = 8;
+      m.renderOrder = 30;
       m.visible = false;
       m.layers.enable(BLOOM_LAYER); // ドロップ光枠も発光として滲ませる
       this.scene.add(m);
@@ -691,14 +777,16 @@ export class TableScene {
         color: '#66f0b4',
         transparent: true,
         opacity: 0,
+        // 付け札の光枠も、対象メルドのカードに隠れず最前面へ（項目2）。
+        depthTest: false,
         depthWrite: false,
         side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending,
       });
       const ring = new THREE.Mesh(this.meldRingGeo, mat);
       ring.rotation.x = -Math.PI / 2;
-      ring.position.set(c.x, TABLE_TOP_Y + 0.09, c.z);
-      ring.renderOrder = 8;
+      ring.position.set(c.x, TABLE_TOP_Y + 0.12, c.z);
+      ring.renderOrder = 31;
       ring.layers.enable(BLOOM_LAYER);
       this.scene.add(ring);
       this.activeMeldRings.push(ring);
@@ -909,53 +997,83 @@ export class TableScene {
     return tex;
   }
 
-  private syncBackPool(
-    targets: { pos: THREE.Vector3; quat: THREE.Quaternion }[],
-    now: number,
-    dealing: boolean,
-    deckPos: THREE.Vector3,
-  ): void {
-    // 必要数までプール拡張
-    while (this.backPool.length < targets.length) {
-      const group = this.buildCard(null);
-      group.visible = false;
-      this.scene.add(group);
-      this.backPool.push({
-        id: `back${this.backPool.length}`,
-        group,
-        born: now,
-        delay: 0,
-        targetPos: new THREE.Vector3(),
-        targetQuat: new THREE.Quaternion(),
-        removing: false,
-        removeAt: 0,
-        spawned: true,
-        targetScale: 1,
+  /**
+   * 裏カード（他家手札＝空中扇 / 山札＝スタック）を安定 ID で同期する（項目3/4/6 再設計）。
+   * - 既存キーは目標だけ更新（同一メッシュが滑らかに追従）。手番交代で席の可視が入れ替わっても
+   *   卓を横断する誤アニメが出ない。
+   * - 新規キーは生成。「他家がツモした末尾スロット」と配札のみ山札位置から飛ばし（fromDeck）、
+   *   それ以外（席の可視トグル等）はその場に出現させる（E7: 誤飛翔の抑止）。
+   * - 消えたキーは removing=true（loop がその場フェード）。山札方向へは動かさない（項目3: 吸い込み廃止）。
+   */
+  private syncBacks(view: PlayerView, now: number, dealing: boolean, deckPos: THREE.Vector3): void {
+    const desired = new Map<string, { pos: THREE.Vector3; quat: THREE.Quaternion; fromDeck: boolean; delay: number }>();
+    let dealIdx = 0;
+    for (const seat of view.seats) {
+      if (seat.index === view.youIndex) continue;
+      const prev = this.backSeatCount.get(seat.index);
+      const slots = this.floatHandLayout(seat.index, seat.handCount);
+      slots.forEach((s, k) => {
+        // 他家ツモ検出（項目3/E7）: 既に見えていた席が +1 枚で、その増えた末尾スロットだけを
+        // 山札から飛翔させる。配札・席の可視トグル（ホットシートの youIndex 変化）では飛ばさない。
+        const isDraw = prev !== undefined && seat.handCount === prev + 1 && k === seat.handCount - 1;
+        desired.set(`h:${seat.index}:${k}`, {
+          pos: s.pos,
+          quat: s.quat,
+          fromDeck: dealing || isDraw,
+          delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
+        });
+      });
+      this.backSeatCount.set(seat.index, seat.handCount);
+    }
+    // 非表示になった席（人数減 / 自席化）の記録は破棄（次の +1 誤検出を防ぐ）。
+    for (const idx of [...this.backSeatCount.keys()]) {
+      if (!view.seats.some((s) => s.index === idx && idx !== view.youIndex)) this.backSeatCount.delete(idx);
+    }
+    // 山札: 高さ＝実枚数連動（項目4・E1）。0 枚でキーが無くなり山札は消える。
+    const deckShown = Math.min(view.deckCount, 14);
+    for (let i = 0; i < deckShown; i++) {
+      desired.set(`d:${i}`, {
+        pos: new THREE.Vector3(0.5, TABLE_TOP_Y + 0.03 + i * 0.02, 0),
+        quat: DECK_QUAT,
+        fromDeck: false,
+        delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
       });
     }
-    this.backPool.forEach((obj, i) => {
-      if (i < targets.length) {
-        if (!obj.group.visible) {
-          obj.group.visible = true;
-          if (dealing) {
-            // 配札演出: 山札からリズミカルに1枚ずつ飛び出す（loop が delay 経過後に補間開始）
-            obj.group.position.copy(deckPos);
-            obj.group.quaternion.copy(targets[i]!.quat);
-            obj.born = now;
-            obj.delay = i * DEAL_STEP_MS;
-          } else {
-            obj.group.position.copy(targets[i]!.pos);
-            obj.group.quaternion.copy(targets[i]!.quat);
-            obj.born = now;
-            obj.delay = 0;
-          }
-        }
-        obj.targetPos.copy(targets[i]!.pos);
-        obj.targetQuat.copy(targets[i]!.quat);
+
+    for (const [key, t] of desired) {
+      const obj = this.backById.get(key);
+      if (!obj) {
+        const group = this.buildCard(null);
+        const spawn = t.fromDeck ? deckPos : t.pos;
+        group.position.copy(spawn);
+        group.quaternion.copy(t.quat);
+        group.scale.setScalar(t.fromDeck ? 0.85 : 1);
+        this.scene.add(group);
+        this.backById.set(key, {
+          id: key,
+          group,
+          born: now,
+          delay: t.delay,
+          targetPos: t.pos.clone(),
+          targetQuat: t.quat.clone(),
+          removing: false,
+          removeAt: 0,
+          spawned: t.delay === 0 && !t.fromDeck,
+          targetScale: 1,
+        });
       } else {
-        obj.group.visible = false;
+        obj.targetPos.copy(t.pos);
+        obj.targetQuat.copy(t.quat);
+        obj.removing = false;
       }
-    });
+    }
+    // 不要になったキーはその場フェード退場（山札方向へは動かさない）。
+    for (const [, obj] of this.backById) {
+      if (!desired.has(obj.id) && !obj.removing) {
+        obj.removing = true;
+        obj.removeAt = now;
+      }
+    }
   }
 
   // ---- 演出 API（app.ts のイベント検出から呼ばれる） -----------------------
@@ -1331,9 +1449,8 @@ export class TableScene {
         }
       }
     }
-    // 裏カード補間（配札スタッガの delay を尊重）
-    for (const obj of this.backPool) {
-      if (!obj.group.visible) continue;
+    // 裏カード補間（安定 ID・配札/ツモ飛翔の delay 尊重・退場はその場フェード）
+    for (const [id, obj] of this.backById) {
       if (now - obj.born < obj.delay) {
         busy = true;
         continue;
@@ -1341,6 +1458,22 @@ export class TableScene {
       motion += obj.group.position.distanceTo(obj.targetPos);
       obj.group.position.lerp(obj.targetPos, k);
       obj.group.quaternion.slerp(obj.targetQuat, k);
+      if (!obj.removing) {
+        // 出現ポップ（飛翔カードは 0.85→1.0 に膨らむ）
+        const s = obj.group.scale.x;
+        if (Math.abs(s - 1) > 0.001) {
+          obj.group.scale.setScalar(s + (1 - s) * k);
+          motion += Math.abs(1 - s);
+        }
+      } else {
+        busy = true;
+        const s = Math.max(0, 1 - (now - obj.removeAt) / 260);
+        obj.group.scale.setScalar(s);
+        if (s <= 0.001) {
+          this.scene.remove(obj.group);
+          this.backById.delete(id);
+        }
+      }
     }
 
     // 光輪（ショックウェーブ）: 拡大しながらフェードアウト
@@ -1415,7 +1548,9 @@ export class TableScene {
   clearCards(): void {
     for (const [, obj] of this.known) this.scene.remove(obj.group);
     this.known.clear();
-    for (const obj of this.backPool) obj.group.visible = false;
+    for (const [, obj] of this.backById) this.scene.remove(obj.group);
+    this.backById.clear();
+    this.backSeatCount.clear();
     this.freshDeal = true;
     // 新ラウンドは既定視点から始める（項目1: ラウンド開始の自動カメラ演出を維持）。
     this.userControlled = false;
@@ -1485,7 +1620,8 @@ export class TableScene {
     disposeFelt();
 
     this.known.clear();
-    this.backPool.length = 0;
+    this.backById.clear();
+    this.backSeatCount.clear();
 
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
