@@ -20,7 +20,9 @@ const TABLE_TOP_Y = 0;
 const SEAT_R = 2.55; // 席の半径
 const HAND_SPACING = 0.52;
 const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
-const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延）
+export const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延・app.ts の配札SFX同期で共有・Q9）
+const ENTRANCE_MS = 340; // 出現アニメ時間（easeOutBack のバネ・オーバーシュート・Q6/Q12）
+const SWEEP_MS = 420; // ラウンド遷移の旧札掃引退場の時間（Q1）
 const MAX_RINGS = 10; // 光輪（ショックウェーブ）の同時上限（派手化で二重リングを出すため増量・契約09項目2）
 const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の中心（update と一致）
 // 山札カードの向き（卓に伏せて水平・面下）。毎フレームの Euler 生成を避け共有する。
@@ -58,6 +60,13 @@ interface CardObj {
   targetScale: number; // 目標スケール（メルドは席の混み具合で段階縮小・契約11。非メルドは1）
   meldId?: number; // 面カードが 3D メルドに属する場合の所属メルドID（レイキャスト付け札用・R4項目5）
   spawnPos: THREE.Vector3; // 出現時の出発点（飛翔のスポーン元・契約14項目5の検証用に保持）
+  // カードごとに複製した材質（共有材質のクローン）。opacity を個別に動かすため（Q5/Q6/U3）。
+  // 共有マップ（face/back テクスチャ）はクローンでも参照共有されるため、重い資源は増えない。
+  // 一貫して transparent=true・depthWrite=true とし、定常時は opacity=1 で不透明カードと同じ描画になる
+  // （メルド段差の Z 整合＝distinctY を壊さない・E7）。
+  mats: THREE.Material[];
+  opacity: number; // 現在の可視不透明度（出現=0→1 フェードイン / 退場・遮蔽=→0 フェードアウト）
+  occluded: boolean; // カメラ回り込みで手前を塞ぐ他家手札（U3: フェードで消す対象）
 }
 
 export class TableScene {
@@ -128,6 +137,19 @@ export class TableScene {
   private freshDeal = false; // clearCards 直後の一括配札（スタッガ演出）
   private ringGeo!: THREE.RingGeometry;
   private rings: { mesh: THREE.Mesh; t: number; dur: number; r0: number; r1: number; op: number }[] = [];
+  // ラウンド遷移の旧札掃引退場（Q1）。clearCards が現行カードをここへ移し、loop がフェード+掃引で消す。
+  private sweeping: { group: THREE.Group; mats: THREE.Material[]; born: number; to: THREE.Vector3 }[] = [];
+  // タイトル背景のデモ対局用シネマティックカメラ（U4）。true の間は自動でゆっくり周回し idle しない。
+  private cinematic = false;
+  private cineT = 0;
+  // ドロップ光枠のフェードアウト（Q15）。hideDropTargets は即消しでなくここでフェードしてから片付ける。
+  private dropHiding = false;
+  private dropHideAt = 0;
+  // 手番席の存在感（Q15）: フェルト上の柔らかな光だまり。spotTarget に追従して脈動する。
+  private spotGlow!: THREE.Mesh;
+  // 鳴きウィンドウ開始演出（Q11）: 対象の捨て札上で脈動する3Dハイライトリング。
+  private claimRing!: THREE.Mesh;
+  private claimFocusActive = false;
 
   // 3D ドロップ標的の視覚化（契約05項目1）: 捨て札リング・場（公開）リング・付け札メルドの光枠。
   private tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(TABLE_TOP_Y + 0.04));
@@ -172,6 +194,8 @@ export class TableScene {
       mat: THREE.SpriteMaterial;
       key: string;
       basePos: THREE.Vector3; // クランプ前の基準位置（縦画面の画面内収納に使う・項目4）
+      opacity: number; // 現在の可視不透明度（Q8: 表示切替・手番強調をクロスフェード）
+      opacityTarget: number; // 目標（表示=1 / 非表示=0）
     }
   >();
 
@@ -399,13 +423,14 @@ export class TableScene {
    * カード視認性を損なわないよう壁は暗めの暖色。モバイル（low ティア）では窓/据置ライトを省き軽量化。
    */
   private buildRoom(): void {
-    const S = 34; // 部屋の一辺
-    const H = 13; // 天井高
+    const S = 24; // 部屋の一辺（家具が視界に入る距離まで壁を寄せ、居間らしい囲われ感を出す・U1）
+    const H = 7.6; // 天井高
     const floorY = -0.5;
+    const wallZ = S / 2; // 壁の内面座標
     // BoxGeometry の面順: +x, -x, +y(天井), -y(床), +z, -z。面ごとに材質を割り当てる。
     const wall = (color: string): THREE.MeshStandardMaterial =>
       new THREE.MeshStandardMaterial({ color, roughness: 0.96, metalness: 0, side: THREE.BackSide });
-    const wallMat = wall('#6b5540'); // 壁: 暖色の塗り壁/板（明るい家の部屋・契約14項目1）
+    const wallMat = wall('#7a6249'); // 壁: 暖色の塗り壁（明るい家の居間・契約14項目1）
     const ceilMat = wall('#4a3a2a'); // 天井: 壁より一段暗い暖色
     const floorMat = new THREE.MeshStandardMaterial({ color: '#5a4530', roughness: 0.98, side: THREE.BackSide }); // 床板
     const mats = [wallMat, wallMat.clone(), ceilMat, floorMat, wallMat.clone(), wallMat.clone()];
@@ -413,45 +438,148 @@ export class TableScene {
     room.position.set(0, floorY + H / 2, 0);
     room.receiveShadow = false; // 内壁は影計算に含めない（コスト削減・見た目に不要）
     this.scene.add(room);
+    // 部屋を寄せたのでフォグ遠方を壁の手前に合わせ直す（壁が奥へ自然に溶ける）。
+    this.scene.fog = new THREE.Fog('#40301f', 12, 26);
+    this.buildFurniture(floorY, wallZ, H);
+  }
 
-    if (this.quality.name === 'low') {
-      // モバイル（低ティア）は窓/据置ランプの追加ジオメトリ・点光源を省いて軽量化するが、
-      // 明るさ・暖かみは落とさない（契約14項目1）。方向を持たない安価な暖色フィルを1灯だけ足し、
-      // 卓と裏面手札を上方から満遍なく持ち上げる（影・追加メッシュなしでコストはほぼゼロ）。
-      const softFill = new THREE.DirectionalLight(0xffe6c2, 0.55);
-      softFill.position.set(0, 9, 2);
-      this.scene.add(softFill);
-      return;
+  /**
+   * フルセットの居間の内装（U1）: 窓+カーテン・本棚・ソファ+サイドテーブル+ランプ・ラグ・観葉植物・
+   * 壁の額・天井照明。すべてプロシージャル（低頂点の Box/Cylinder を共有ジオメトリで大量配置）で、
+   * ティアに依らず同一のフルセットを作る（モバイルも省略しない）。全メッシュは既定レイヤ(0)のまま＝
+   * 選択的 Bloom（レイヤ1抽出）には一切載らない（E1）。装飾は影計算に含めず（cast/receive=false）、
+   * 部屋の影・フォグ・60fps 目標に干渉しない。点光源はティアで加減し、明るさは発光メッシュで底上げする。
+   */
+  private buildFurniture(floorY: number, wallZ: number, H: number): void {
+    const add = (m: THREE.Mesh): THREE.Mesh => {
+      m.castShadow = false;
+      m.receiveShadow = false;
+      this.scene.add(m);
+      return m;
+    };
+    // 共有ジオメトリ（単位立方体/単位円柱）をスケールで使い回し、頂点・生成コストを抑える。
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const cyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 14);
+    const mat = (color: string, rough = 0.9, metal = 0): THREE.MeshStandardMaterial =>
+      new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal });
+    const emis = (color: string): THREE.MeshBasicMaterial => new THREE.MeshBasicMaterial({ color });
+    const boxMesh = (m: THREE.Material, w: number, h: number, d: number, x: number, y: number, z: number, ry = 0): THREE.Mesh => {
+      const me = new THREE.Mesh(box, m);
+      me.scale.set(w, h, d);
+      me.position.set(x, y, z);
+      me.rotation.y = ry;
+      return add(me);
+    };
+    const cylMesh = (m: THREE.Material, r: number, h: number, x: number, y: number, z: number): THREE.Mesh => {
+      const me = new THREE.Mesh(cyl, m);
+      me.scale.set(r * 2, h, r * 2);
+      me.position.set(x, y, z);
+      return add(me);
+    };
+    const woodDark = mat('#3f2c1a', 0.8);
+    const woodMid = mat('#6b4a2c', 0.75);
+
+    // ラグ（卓の下・床の上）: 薄い円盤 + 縁取りリング。フェルト卓の緑と調和する落ち着いた臙脂。
+    const rug = new THREE.Mesh(new THREE.CircleGeometry(5.2, 40), mat('#5b2f2c', 1));
+    rug.rotation.x = -Math.PI / 2;
+    rug.position.set(0, floorY + 0.02, 0);
+    add(rug);
+    const rugRing = new THREE.Mesh(new THREE.RingGeometry(4.5, 5.0, 40), mat('#7a4a3a', 1));
+    rugRing.rotation.x = -Math.PI / 2;
+    rugRing.position.set(0, floorY + 0.03, 0);
+    add(rugRing);
+
+    // 窓（-z 壁）+ 十字桟 + 左右カーテン。発光パネルは MeshBasic（Bloom 非対象・レイヤ0）。
+    const winW = 5.0;
+    const winH = 3.2;
+    const winY = floorY + 3.4;
+    const winZ = -wallZ + 0.06;
+    add(new THREE.Mesh(new THREE.PlaneGeometry(winW, winH), emis('#ffd7a0'))).position.set(-3, winY, winZ);
+    const frameMat = emis('#241708');
+    boxMesh(frameMat, 0.14, winH + 0.3, 0.06, -3, winY, winZ + 0.02);
+    boxMesh(frameMat, winW + 0.3, 0.14, 0.06, -3, winY, winZ + 0.02);
+    boxMesh(woodDark, winW + 0.6, 0.28, 0.24, -3, winY + winH / 2 + 0.2, winZ + 0.02); // 窓上枠
+    const curtain = mat('#8a3f38', 0.95);
+    boxMesh(curtain, 1.0, winH + 0.8, 0.14, -3 - winW / 2 - 0.3, winY, winZ + 0.12);
+    boxMesh(curtain, 1.0, winH + 0.8, 0.14, -3 + winW / 2 + 0.3, winY, winZ + 0.12);
+
+    // 本棚（+x 壁ぎわ）: 枠 + 棚板 + カラフルな背表紙（小さな箱を並べる）。
+    const shelfX = wallZ - 0.5;
+    const shelfY = floorY + 1.9;
+    boxMesh(woodMid, 0.4, 3.6, 2.6, shelfX, shelfY, -3); // 側板・背
+    const bookColors = ['#b5462f', '#3f6ea5', '#c9a23a', '#4d7a4a', '#7a4a86', '#c26b3a'];
+    for (let s = 0; s < 4; s++) {
+      const sy = floorY + 0.55 + s * 0.85;
+      boxMesh(woodDark, 0.36, 0.08, 2.5, shelfX - 0.06, sy - 0.2, -3); // 棚板
+      for (let b = 0; b < 9; b++) {
+        const bc = bookColors[(s * 3 + b) % bookColors.length]!;
+        const bh = 0.5 + ((b * 7 + s * 3) % 5) * 0.05;
+        boxMesh(mat(bc, 0.85), 0.28, bh, 0.16, shelfX - 0.06, sy + bh / 2 - 0.16, -3 - 1.05 + b * 0.26);
+      }
     }
 
-    // 窓（-z 壁に暖色の外光パネル）: 発光は MeshBasic（Bloom 非対象レイヤ0）で表現。夕方の家の窓。
-    const winW = 5.4;
-    const winH = 4.2;
-    const win = new THREE.Mesh(
-      new THREE.PlaneGeometry(winW, winH),
-      new THREE.MeshBasicMaterial({ color: '#ffcf8f' }),
-    );
-    win.position.set(-4, floorY + 4.6, -S / 2 + 0.06); // 壁のすぐ内側
-    this.scene.add(win);
-    // 窓桟（十字の暗いフレーム）で「窓」らしさを補強。
-    const frameMat = new THREE.MeshBasicMaterial({ color: '#2a1c10' });
-    const barV = new THREE.Mesh(new THREE.PlaneGeometry(0.16, winH), frameMat);
-    barV.position.set(win.position.x, win.position.y, win.position.z + 0.02);
-    this.scene.add(barV);
-    const barH = new THREE.Mesh(new THREE.PlaneGeometry(winW, 0.16), frameMat);
-    barH.position.copy(barV.position);
-    this.scene.add(barH);
+    // ソファ（-x 壁ぎわ・卓へ向く）: 座面 + 背 + 肘掛け + クッション。
+    const sofaX = -wallZ + 1.0;
+    const sofaBase = mat('#3f5b6e', 0.95);
+    boxMesh(sofaBase, 1.5, 0.7, 4.2, sofaX, floorY + 0.35, 2); // 座面
+    boxMesh(sofaBase, 0.6, 1.5, 4.2, sofaX - 0.55, floorY + 0.9, 2); // 背
+    boxMesh(sofaBase, 1.6, 1.0, 0.5, sofaX, floorY + 0.7, 2 - 2.1); // 肘掛け
+    boxMesh(sofaBase, 1.6, 1.0, 0.5, sofaX, floorY + 0.7, 2 + 2.1);
+    boxMesh(mat('#c9a23a', 0.9), 0.9, 0.5, 0.9, sofaX + 0.2, floorY + 0.85, 1.1); // クッション
+    boxMesh(mat('#b5462f', 0.9), 0.9, 0.5, 0.9, sofaX + 0.2, floorY + 0.85, 2.9);
 
-    // 窓からの暖色の指向性光 + 部屋の据置ランプ（点光源）。カードのキー光は既存 key に任せ、
-    // これらは環境の温かみを足すだけの弱め設定（視認性を損なわない）。
-    const windowLight = new THREE.DirectionalLight(0xffcf94, 0.35);
-    windowLight.position.set(-4, floorY + 4.6, -6);
-    windowLight.target.position.set(0, 0, 0);
-    this.scene.add(windowLight);
-    this.scene.add(windowLight.target);
-    const lamp = new THREE.PointLight(0xffb066, 14, 16, 2);
-    lamp.position.set(6.5, floorY + 5.5, 5.5);
-    this.scene.add(lamp);
+    // サイドテーブル + ランプ（ソファ脇）: 天板 + 脚 + ランプ台 + 発光シェード。
+    const stX = -wallZ + 1.2;
+    const stZ = -1.6;
+    cylMesh(woodMid, 0.55, 0.12, stX, floorY + 1.0, stZ); // 天板
+    boxMesh(woodDark, 0.14, 1.0, 0.14, stX, floorY + 0.5, stZ); // 脚
+    cylMesh(mat('#20242b', 0.6, 0.2), 0.08, 0.5, stX, floorY + 1.3, stZ); // ランプ支柱
+    add(new THREE.Mesh(new THREE.ConeGeometry(0.42, 0.5, 18, 1, true), emis('#ffdca0'))).position.set(stX, floorY + 1.75, stZ); // シェード（発光）
+
+    // 観葉植物（隅 2 か所）: 鉢 + 葉（低ポリの円錐を数枚）。
+    const plant = (px: number, pz: number): void => {
+      cylMesh(mat('#7a4a2c', 0.9), 0.45, 0.7, px, floorY + 0.35, pz); // 鉢
+      const leaf = mat('#3f6b3a', 0.85);
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2;
+        const cone = new THREE.Mesh(new THREE.ConeGeometry(0.34, 1.7, 8), leaf);
+        cone.position.set(px + Math.cos(a) * 0.18, floorY + 1.5, pz + Math.sin(a) * 0.18);
+        cone.rotation.z = Math.cos(a) * 0.3;
+        cone.rotation.x = Math.sin(a) * 0.3;
+        add(cone);
+      }
+    };
+    plant(wallZ - 1.2, wallZ - 1.2);
+    plant(-wallZ + 1.2, wallZ - 1.2);
+
+    // 壁の額（+z 壁に 3 枚）: 額縁 + 単色の抽象画パネル。
+    const artColors = ['#3f6ea5', '#8a6f3a', '#5b7a4a'];
+    for (let i = 0; i < 3; i++) {
+      const ax = -3.2 + i * 3.2;
+      boxMesh(woodDark, 1.7, 1.3, 0.08, ax, floorY + 3.2, wallZ - 0.05); // 額縁
+      boxMesh(mat(artColors[i]!, 0.8), 1.45, 1.05, 0.02, ax, floorY + 3.2, wallZ - 0.09); // 画
+    }
+
+    // 天井照明: 発光する円盤シェード + 弱い環状の造形（真下の卓を柔らかく照らす見た目）。
+    const ceilY = floorY + H - 0.15;
+    cylMesh(emis('#fff0d0'), 0.9, 0.14, 0, ceilY, 0);
+    cylMesh(mat('#2a2018', 0.7), 0.05, 0.5, 0, ceilY - 0.35, 0); // 吊り棒
+
+    // 照明: 環境光/半球光は buildEnvironment で全ティア明るめ。ここでは温かみの点光源を足す。
+    // 高ティアは窓＋ランプ＋天井の3点光源、低ティアは天井1点に絞って軽量化（ジオメトリは同一・U1）。
+    const ceilingLight = new THREE.PointLight(0xfff0d0, this.quality.name === 'low' ? 18 : 14, 20, 2);
+    ceilingLight.position.set(0, ceilY - 0.5, 0);
+    this.scene.add(ceilingLight);
+    if (this.quality.name !== 'low') {
+      const windowLight = new THREE.DirectionalLight(0xffcf94, 0.32);
+      windowLight.position.set(-3, winY, -6);
+      windowLight.target.position.set(0, 0, 0);
+      this.scene.add(windowLight);
+      this.scene.add(windowLight.target);
+      const lamp = new THREE.PointLight(0xffb066, 10, 12, 2);
+      lamp.position.set(stX, floorY + 1.75, stZ);
+      this.scene.add(lamp);
+    }
   }
 
   // ---- カードメッシュ生成（共有ジオメトリ/マテリアル） --------------------
@@ -475,22 +603,88 @@ export class TableScene {
 
   private buildCard(card: Card | null): THREE.Group {
     const g = new THREE.Group();
-    const body = new THREE.Mesh(this.bodyGeo, this.bodyMat);
+    // 材質はカードごとに複製する（opacity を個別に動かすため・Q5/Q6/U3）。マップ（テクスチャ）は
+    // クローンでも参照共有されるので重い資源は増えない。transparent=true / depthWrite=true 固定で、
+    // 定常時 opacity=1 のとき不透明カードと同一に描画される（メルド段差の Z 整合を保つ・E7）。
+    const mats: THREE.Material[] = [];
+    const prep = <T extends THREE.Material>(src: T): T => {
+      const m = src.clone() as T & { transparent: boolean; depthWrite: boolean; opacity: number };
+      m.transparent = true;
+      m.depthWrite = true;
+      m.opacity = 1;
+      mats.push(m);
+      return m as unknown as T;
+    };
+    const body = new THREE.Mesh(this.bodyGeo, prep(this.bodyMat));
     body.castShadow = true;
     body.receiveShadow = true;
     g.add(body);
 
-    const back = new THREE.Mesh(this.planeGeo, this.backMat);
+    const back = new THREE.Mesh(this.planeGeo, prep(this.backMat));
     back.rotation.y = Math.PI;
     back.position.z = -(CARD_D / 2 + 0.006); // 本体面から十分に離し共面を避ける
     g.add(back);
 
     if (card) {
-      const front = new THREE.Mesh(this.planeGeo, this.frontMat(card));
+      const front = new THREE.Mesh(this.planeGeo, prep(this.frontMat(card)));
       front.position.z = CARD_D / 2 + 0.006;
       g.add(front);
     }
+    g.userData.cardMats = mats;
     return g;
+  }
+
+  /** カード群の現在 opacity を材質へ反映し、ほぼ透明なら非表示にする（描画節約）。 */
+  private applyCardOpacity(obj: CardObj): void {
+    const o = obj.opacity;
+    for (const m of obj.mats) (m as THREE.Material & { opacity: number }).opacity = o;
+    obj.group.visible = o > 0.008;
+  }
+
+  /** カード1枚分の複製材質を破棄（共有テクスチャは material.dispose では解放されないので安全・E6）。 */
+  private disposeCardMats(obj: { mats: THREE.Material[] }): void {
+    for (const m of obj.mats) m.dispose();
+  }
+
+  /**
+   * 1枚のカードを目標へ補間し、出現/退場/遮蔽のフェード（Q5/Q6/U3）とバネ状の出現スケール（Q12）を
+   * 適用する。戻り値 done=true で呼び出し側が scene から除去・材質破棄する。
+   */
+  private animateCard(obj: CardObj, now: number, k: number): { done: boolean; busy: boolean } {
+    const age = now - obj.born - obj.delay;
+    if (age < 0) return { done: false, busy: true }; // 配札/飛翔ディレイ待ち（不可視のまま）
+    obj.spawned = true;
+    obj.group.position.lerp(obj.targetPos, k);
+    obj.group.quaternion.slerp(obj.targetQuat, k);
+    // 不透明度: 退場0 / 遮蔽0 / 通常1 へ速めに追従（フェードイン/アウト統一・線形縮小の廃止）。
+    const targetOp = obj.removing ? 0 : obj.occluded ? 0 : 1;
+    const ko = Math.min(1, k * 1.7);
+    let busy = false;
+    if (Math.abs(obj.opacity - targetOp) > 0.002) {
+      obj.opacity += (targetOp - obj.opacity) * ko;
+      busy = true;
+    } else {
+      obj.opacity = targetOp;
+    }
+    this.applyCardOpacity(obj);
+    if (obj.removing) {
+      const s = obj.group.scale.x;
+      obj.group.scale.setScalar(s + (obj.targetScale * 0.86 - s) * k); // ほのかに縮めながら退場
+      if (obj.opacity < 0.02) return { done: true, busy: false };
+      return { done: false, busy: true };
+    }
+    if (age < ENTRANCE_MS) {
+      const t = age / ENTRANCE_MS;
+      obj.group.scale.setScalar(obj.targetScale * (0.5 + 0.5 * easeOutBack(t))); // バネのポップイン
+      busy = true;
+    } else {
+      const s = obj.group.scale.x;
+      if (Math.abs(s - obj.targetScale) > 0.001) {
+        obj.group.scale.setScalar(s + (obj.targetScale - s) * k); // メルド再配置のスケール追従
+        busy = true;
+      }
+    }
+    return { done: false, busy };
   }
 
   // ---- レイアウト計算 -----------------------------------------------------
@@ -687,7 +881,7 @@ export class TableScene {
     this.prevYouIndex = view.youIndex;
     // カメラを現手番（=youIndex）席の背後へ演出移動。ただしユーザーが視点を操作中は勝手に戻さない
     // （契約07項目1: リセットはユーザー操作で。ラウンド切替=clearCards で自動的に既定へ復帰する）。
-    if (!this.userControlled) this.aimCameraAt(view.youIndex);
+    if (!this.userControlled && !this.cinematic) this.aimCameraAt(view.youIndex);
     // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る）
     const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
     this.setActiveSeat(curSeat);
@@ -722,7 +916,8 @@ export class TableScene {
       const group = this.buildCard(card);
       group.position.copy(spawnPos);
       group.quaternion.copy(quat);
-      group.scale.setScalar(targetScale * 0.55); // 出現ポップ（loop で targetScale へイージング）
+      group.scale.setScalar(targetScale * 0.5); // 出現ポップ（loop で easeOutBack により targetScale へ）
+      group.visible = false; // opacity 0 スタート（loop の初回でフェードイン開始）
       this.scene.add(group);
       obj = {
         id,
@@ -737,6 +932,9 @@ export class TableScene {
         targetScale,
         meldId,
         spawnPos: spawnPos.clone(),
+        mats: group.userData.cardMats as THREE.Material[],
+        opacity: 0,
+        occluded: false,
       };
       this.known.set(id, obj);
     } else {
@@ -801,6 +999,73 @@ export class TableScene {
     this.discardRing.position.set(DISCARD_C.x, TABLE_TOP_Y + 0.06, DISCARD_C.z);
     this.fieldRing = mk(0.62, 0.8, '#37e08a'); // メルド公開 = 緑
     this.meldRingGeo = new THREE.RingGeometry(0.34, 0.46, 40); // 付け札光枠（メルドごとに材質を持つ）
+
+    // 手番席の光だまり（Q15）: フェルト上の柔らかな暖色ディスク。加算合成で床が仄かに照らされて見える。
+    this.spotGlow = new THREE.Mesh(
+      new THREE.CircleGeometry(1.25, 40),
+      new THREE.MeshBasicMaterial({
+        color: '#ffdca0',
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    this.spotGlow.rotation.x = -Math.PI / 2;
+    this.spotGlow.position.set(0, TABLE_TOP_Y + 0.021, 0);
+    this.spotGlow.renderOrder = 2;
+    this.scene.add(this.spotGlow);
+
+    // 鳴きウィンドウ開始ハイライト（Q11）: 捨て札上の脈動リング。発光として滲ませる。
+    this.claimRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.4, 0.56, 44),
+      new THREE.MeshBasicMaterial({
+        color: '#9fd8ff',
+        transparent: true,
+        opacity: 0,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    this.claimRing.rotation.x = -Math.PI / 2;
+    this.claimRing.position.set(DISCARD_C.x, TABLE_TOP_Y + 0.1, DISCARD_C.z);
+    this.claimRing.renderOrder = 32;
+    this.claimRing.visible = false;
+    this.claimRing.layers.enable(BLOOM_LAYER);
+    this.scene.add(this.claimRing);
+  }
+
+  /** 鳴きウィンドウ開始演出（Q11）: 対象の捨て札を3Dハイライト（app.ts が開始/終了を通知）。 */
+  showClaimFocus(): void {
+    this.claimFocusActive = true;
+    this.claimRing.visible = true;
+    this.wake();
+  }
+
+  hideClaimFocus(): void {
+    this.claimFocusActive = false;
+    this.claimRing.visible = false;
+    (this.claimRing.material as THREE.MeshBasicMaterial).opacity = 0;
+  }
+
+  /** 捨て札の着地の手応え（Q2）: 小さな砂塵バーストと微小な着地リング。app.ts が新規捨て札で呼ぶ。 */
+  discardImpact(): void {
+    const p = new THREE.Vector3(DISCARD_C.x, TABLE_TOP_Y + 0.06, DISCARD_C.z);
+    this.particles.burst(p, { count: 14, color: [0.86, 0.82, 0.72], speed: 1.5, size: 0.06, life: 0.42, spread: 0.85, gravity: 2.2, drag: 2.2 });
+    this.spawnRing(p, '#e8e0cc', { r0: 0.15, r1: 0.9, dur: 0.34, opacity: 0.5 });
+    this.wake();
+  }
+
+  /** タイトル背景のデモ対局用: シネマティックカメラの有効化（U4）。 */
+  setCinematic(on: boolean): void {
+    this.cinematic = on;
+    if (on) {
+      this.userControlled = false;
+      this.cineT = 0;
+    }
+    this.wake();
   }
 
   /** 手札 D&D の開始/終了を通知する。ドラッグ中はキャンバスのカメラ操作を無視する（項目10）。 */
@@ -849,6 +1114,7 @@ export class TableScene {
       this.dropRings.push({ mesh: ring, kind: 'meld', meldId: id, hot: false });
     }
     this.dropActive = true;
+    this.dropHiding = false; // 再表示でフェード中なら打ち切る
     this.wake();
   }
 
@@ -864,15 +1130,24 @@ export class TableScene {
   }
 
   hideDropTargets(): void {
+    // 論理側（付け札可否判定）は即時に無効化し、視覚のリングだけ短くフェードアウトさせる（Q15）。
+    this.attachableMelds.clear();
+    if (!this.dropActive && !this.dropHiding) return;
     this.dropActive = false;
+    this.dropHiding = true;
+    this.dropHideAt = performance.now();
+    this.wake();
+  }
+
+  /** ドロップ光枠のフェードアウト完了時に実際に片付ける（loop から呼ぶ・Q15）。 */
+  private finishHideDropTargets(): void {
+    this.dropHiding = false;
     this.discardRing.visible = false;
     this.fieldRing.visible = false;
     (this.discardRing.material as THREE.MeshBasicMaterial).opacity = 0;
     (this.fieldRing.material as THREE.MeshBasicMaterial).opacity = 0;
     this.clearMeldRings();
     this.dropRings = [];
-    this.attachableMelds.clear();
-    this.wake();
   }
 
   private clearMeldRings(): void {
@@ -969,22 +1244,27 @@ export class TableScene {
       let L = this.labels.get(seat.index);
       if (!L) {
         const tex = this.makeLabelTexture(seat.name, seat.isCurrent);
-        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
+        // 席名ラベルは手札やカードより常に優先して見える（U2）: depthTest=false + 高い renderOrder で
+        // 浮遊手札の裏面に隠れず最前面へ描く。可読性が勝つ。
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, opacity: 0 });
         const sprite = new THREE.Sprite(mat);
+        sprite.renderOrder = 60;
         this.scene.add(sprite);
-        L = { sprite, tex, mat, key, basePos: new THREE.Vector3() };
+        L = { sprite, tex, mat, key, basePos: new THREE.Vector3(), opacity: 0, opacityTarget: 1 };
         this.labels.set(seat.index, L);
       } else if (L.key !== key) {
+        // 手番強調（金枠）や名前変更はテクスチャ差替。opacity を一度沈めてから戻し、クロスフェードにする（Q8）。
         L.tex.dispose();
         L.tex = this.makeLabelTexture(seat.name, seat.isCurrent);
         L.mat.map = L.tex;
         L.mat.needsUpdate = true;
         L.key = key;
+        L.opacity = Math.min(L.opacity, 0.25);
       }
-      // 自席ラベルは非表示（項目5: 自分の席は画面下の扇形手札で自明）。
+      // 自席ラベルは非表示（項目5: 自分の席は画面下の扇形手札で自明）。フェードで消す（Q8）。
       // ホットシートでは youIndex が手番ごとに変わるため、手番席のラベルが隠れる（意図どおり）。
       if (seat.index === view.youIndex) {
-        L.sprite.visible = false;
+        L.opacityTarget = 0;
         continue;
       }
       const dir = this.seatDir(seat.index);
@@ -994,11 +1274,28 @@ export class TableScene {
       L.sprite.position.copy(L.basePos);
       const s = seat.isCurrent ? 1.18 : 1.0;
       L.sprite.scale.set(1.3 * s, 0.46 * s, 1);
-      L.sprite.visible = true;
+      L.opacityTarget = 1;
     }
-    // 席数が減った場合（次ゲームの人数変更等）は余ったラベルを隠す
-    for (const [idx, L] of this.labels) if (idx >= n) L.sprite.visible = false;
+    // 席数が減った場合（次ゲームの人数変更等）は余ったラベルをフェードアウト。
+    for (const [idx, L] of this.labels) if (idx >= n) L.opacityTarget = 0;
     this.clampLabels();
+  }
+
+  /** 席名ラベルの不透明度を目標へ追従させる（Q8: 表示切替・手番強調のクロスフェード）。loop から毎フレーム。 */
+  private stepLabelFades(k: number): boolean {
+    let busy = false;
+    const ko = Math.min(1, k * 1.4);
+    for (const L of this.labels.values()) {
+      if (Math.abs(L.opacity - L.opacityTarget) > 0.004) {
+        L.opacity += (L.opacityTarget - L.opacity) * ko;
+        busy = true;
+      } else {
+        L.opacity = L.opacityTarget;
+      }
+      L.mat.opacity = L.opacity;
+      L.sprite.visible = L.opacity > 0.01;
+    }
+    return busy;
   }
 
   /**
@@ -1120,7 +1417,8 @@ export class TableScene {
         const spawn = t.fromDeck ? deckPos : t.pos;
         group.position.copy(spawn);
         group.quaternion.copy(t.quat);
-        group.scale.setScalar(t.fromDeck ? 0.85 : 1);
+        group.scale.setScalar(0.5); // 出現ポップ（loop で easeOutBack）
+        group.visible = false; // opacity 0 スタート（フェードイン）
         this.scene.add(group);
         this.backById.set(key, {
           id: key,
@@ -1134,6 +1432,9 @@ export class TableScene {
           spawned: t.delay === 0 && !t.fromDeck,
           targetScale: 1,
           spawnPos: spawn.clone(),
+          mats: group.userData.cardMats as THREE.Material[],
+          opacity: 0,
+          occluded: false,
         });
       } else {
         obj.targetPos.copy(t.pos);
@@ -1261,11 +1562,12 @@ export class TableScene {
       if (now) this.blockedSeats.add(seat);
       else this.blockedSeats.delete(seat);
     }
-    // 席ごとの可視状態を空中手札カード（キー h:<席>:<スロット>）へ反映。山札（d:）は対象外。
+    // 席ごとの遮蔽状態を空中手札カード（キー h:<席>:<スロット>）へ反映。山札（d:）は対象外。
+    // 即時 visible 切替ではなく occluded フラグを立て、loop が opacity をフェード（U3・0.2〜0.4s 相当）。
     for (const [key, obj] of this.backById) {
       if (key.charCodeAt(0) !== 104 /* 'h' */) continue;
       const seat = parseInt(key.slice(2), 10);
-      obj.group.visible = !this.blockedSeats.has(seat);
+      obj.occluded = this.blockedSeats.has(seat);
     }
   }
 
@@ -1318,7 +1620,11 @@ export class TableScene {
         this.pointers.size === 1
           ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), moved: false }
           : null;
-      el.setPointerCapture?.(e.pointerId);
+      try {
+        el.setPointerCapture?.(e.pointerId);
+      } catch {
+        /* 合成イベント等でアクティブポインタが無い場合のスロー無害化（デモ卓の常設で露出） */
+      }
       e.preventDefault();
     };
     this.onCamPointerMove = (e: PointerEvent): void => {
@@ -1363,7 +1669,11 @@ export class TableScene {
       }
       // 2→1 本へ減った時に残指を基準へ取り直し、ピンチ↔オービット遷移のジャンプを防ぐ（E9）。
       this.pinchDist = this.pointers.size === 2 ? this.currentPinchDist() : 0;
-      el.releasePointerCapture?.(e.pointerId);
+      try {
+        el.releasePointerCapture?.(e.pointerId);
+      } catch {
+        /* アクティブポインタ不在時のスロー無害化 */
+      }
     };
     this.onCamWheel = (e: WheelEvent): void => {
       zoomBy(Math.exp(e.deltaY * 0.0012)); // ホイールズーム（マウス）
@@ -1529,6 +1839,19 @@ export class TableScene {
     let busy = false; // 退場アニメ等で継続が必要か
     let fxBusy = false; // 粒子/光輪/カメラパンチ等の演出が継続中か
 
+    // タイトル背景のデモ対局: ゆっくりした演出的カメラワーク（緩い旋回 + 時折の寄り引き・U4）。
+    // camPosGoal を毎フレーム更新し、既存のイージング追従で滑らかな眺めにする。idle させない。
+    if (this.cinematic) {
+      this.cineT += dt;
+      const yaw = this.cineT * 0.12;
+      const pitch = 0.6 + 0.16 * Math.sin(this.cineT * 0.17);
+      const radius = 8.3 + 2.0 * Math.sin(this.cineT * 0.09);
+      const cp = Math.cos(pitch);
+      this.camTargetGoal.set(0, 0.15, 0);
+      this.camPosGoal.set(radius * cp * Math.cos(yaw), radius * Math.sin(pitch), radius * cp * Math.sin(yaw));
+      fxBusy = true;
+    }
+
     // カメラ補間
     motion += this.camPos.distanceTo(this.camPosGoal) + this.camTarget.distanceTo(this.camTargetGoal);
     this.camPos.lerp(this.camPosGoal, k * 0.6);
@@ -1558,65 +1881,50 @@ export class TableScene {
     this.spot.target.position.copy(this.spotTarget);
     this.spot.target.updateMatrixWorld?.();
 
-    // 席名ラベルの画面内クランプ（カメラのイージングに追従・項目4）
+    // 席名ラベルの画面内クランプ（カメラのイージングに追従・項目4）+ 不透明度クロスフェード（Q8）
     this.clampLabels();
+    if (this.stepLabelFades(k)) fxBusy = true;
     // カメラが手前に回り込んだ他家の空中手札を隠す（契約14項目4）。カメラのイージングに毎フレーム追従。
     this.updateHandOcclusion();
 
-    // 既知カード補間 + 出現ポップ + 退場処理
+    // 既知カード（面）・裏カードともに統一機構で補間（出現/退場/遮蔽フェード + バネ出現・Q5/Q6/Q12/U3）
     for (const [id, obj] of this.known) {
-      if (now - obj.born >= obj.delay) {
-        obj.spawned = true;
-        motion += obj.group.position.distanceTo(obj.targetPos);
-        obj.group.position.lerp(obj.targetPos, k);
-        obj.group.quaternion.slerp(obj.targetQuat, k);
-        if (!obj.removing) {
-          const ts = obj.targetScale;
-          const s = obj.group.scale.x;
-          if (Math.abs(s - ts) > 0.001) {
-            obj.group.scale.setScalar(s + (ts - s) * k);
-            motion += Math.abs(ts - s);
-          }
-        }
-      } else {
-        busy = true; // 配札ディレイ待ち
-      }
-      if (obj.removing) {
-        busy = true;
-        // 退場フェードは目標スケール基準（縮小メルドが退場時に一瞬拡大しない）
-        const s = obj.targetScale * Math.max(0, 1 - (now - obj.removeAt) / 260);
-        obj.group.scale.setScalar(s);
-        if (s <= 0.001) {
-          this.scene.remove(obj.group);
-          this.known.delete(id);
-        }
+      motion += obj.group.position.distanceTo(obj.targetPos);
+      const r = this.animateCard(obj, now, k);
+      if (r.busy) busy = true;
+      if (r.done) {
+        this.scene.remove(obj.group);
+        this.disposeCardMats(obj);
+        this.known.delete(id);
       }
     }
-    // 裏カード補間（安定 ID・配札/ツモ飛翔の delay 尊重・退場はその場フェード）
     for (const [id, obj] of this.backById) {
-      if (now - obj.born < obj.delay) {
-        busy = true;
+      motion += obj.group.position.distanceTo(obj.targetPos);
+      const r = this.animateCard(obj, now, k);
+      if (r.busy) busy = true;
+      if (r.done) {
+        this.scene.remove(obj.group);
+        this.disposeCardMats(obj);
+        this.backById.delete(id);
+      }
+    }
+
+    // ラウンド遷移の旧札掃引退場（Q1）: フェードしながら卓外・下方へ払われる。配札（新カード）と重なって
+    // クロスフェードになる。SWEEP_MS で消える。
+    for (let i = this.sweeping.length - 1; i >= 0; i--) {
+      const sw = this.sweeping[i]!;
+      const u = (now - sw.born) / SWEEP_MS;
+      if (u >= 1) {
+        this.scene.remove(sw.group);
+        for (const m of sw.mats) m.dispose();
+        this.sweeping.splice(i, 1);
         continue;
       }
-      motion += obj.group.position.distanceTo(obj.targetPos);
-      obj.group.position.lerp(obj.targetPos, k);
-      obj.group.quaternion.slerp(obj.targetQuat, k);
-      if (!obj.removing) {
-        // 出現ポップ（飛翔カードは 0.85→1.0 に膨らむ）
-        const s = obj.group.scale.x;
-        if (Math.abs(s - 1) > 0.001) {
-          obj.group.scale.setScalar(s + (1 - s) * k);
-          motion += Math.abs(1 - s);
-        }
-      } else {
-        busy = true;
-        const s = Math.max(0, 1 - (now - obj.removeAt) / 260);
-        obj.group.scale.setScalar(s);
-        if (s <= 0.001) {
-          this.scene.remove(obj.group);
-          this.backById.delete(id);
-        }
-      }
+      const e = u * u * (3 - 2 * u); // smoothstep
+      sw.group.position.lerp(sw.to, Math.min(1, k));
+      sw.group.scale.setScalar(Math.max(0.02, 1 - e));
+      for (const m of sw.mats) (m as THREE.Material & { opacity: number }).opacity = 1 - e;
+      busy = true;
     }
 
     // 光輪（ショックウェーブ）: 拡大しながらフェードアウト
@@ -1645,6 +1953,21 @@ export class TableScene {
     // パーティクル
     if (this.particles.update(dt)) fxBusy = true;
 
+    // 手番席の光だまり（Q15: 存在感強化）: spotTarget に追従し、ゆるく脈動する暖色の床グロー。
+    {
+      this.spotGlow.position.set(this.spotTarget.x, TABLE_TOP_Y + 0.021, this.spotTarget.z);
+      const gm = this.spotGlow.material as THREE.MeshBasicMaterial;
+      gm.opacity = 0.16 + 0.06 * (0.5 + 0.5 * Math.sin(now * 0.0022));
+    }
+
+    // 鳴きウィンドウ開始のハイライト（Q11）: 対象の捨て札上で脈動するリング。
+    if (this.claimFocusActive) {
+      const cm = this.claimRing.material as THREE.MeshBasicMaterial;
+      cm.opacity = 0.5 + 0.35 * (0.5 + 0.5 * Math.sin(now * 0.008));
+      this.claimRing.scale.setScalar(1 + 0.06 * Math.sin(now * 0.008));
+      fxBusy = true;
+    }
+
     // 3D ドロップ標的の脈動（ドラッグ中のみ・ホバー標的は強調）
     if (this.dropActive) {
       const puls = 0.34 + 0.22 * (0.5 + 0.5 * Math.sin(now * 0.005));
@@ -1654,6 +1977,13 @@ export class TableScene {
         r.mesh.scale.setScalar(r.hot ? 1.16 : 1.0);
       }
       fxBusy = true;
+    } else if (this.dropHiding) {
+      // ドロップ終了: 即消しでなく短くフェードアウトしてから片付ける（Q15）。
+      const u = (now - this.dropHideAt) / 220;
+      const f = Math.max(0, 1 - u);
+      for (const r of this.dropRings) (r.mesh.material as THREE.MeshBasicMaterial).opacity = f * 0.9;
+      if (u >= 1) this.finishHideDropTargets();
+      else fxBusy = true;
     }
 
     // 描画（Bloom があればコンポーザ経由）
@@ -1689,9 +2019,24 @@ export class TableScene {
 
   /** ラウンド切り替え等でカードを全消去（次の update で再構築＝配札スタッガ演出）。 */
   clearCards(): void {
-    for (const [, obj] of this.known) this.scene.remove(obj.group);
+    // 旧札はハードカットで消さず、掃引退場リストへ移して配札とクロスフェードさせる（Q1）。
+    const now = performance.now();
+    const sweep = (obj: CardObj): void => {
+      // 掃引が溜まりすぎたら即破棄（連続 clearCards の暴走防止）。
+      if (this.sweeping.length > 120) {
+        this.scene.remove(obj.group);
+        this.disposeCardMats(obj);
+        return;
+      }
+      const to = obj.group.position.clone();
+      const h = TMP_A.set(to.x, 0, to.z);
+      if (h.lengthSq() > 1e-4) to.addScaledVector(h.normalize(), 0.7);
+      to.y -= 0.7;
+      this.sweeping.push({ group: obj.group, mats: obj.mats, born: now, to });
+    };
+    for (const [, obj] of this.known) sweep(obj);
     this.known.clear();
-    for (const [, obj] of this.backById) this.scene.remove(obj.group);
+    for (const [, obj] of this.backById) sweep(obj);
     this.backById.clear();
     this.backSeatCount.clear();
     this.freshDeal = true;
@@ -1729,6 +2074,7 @@ export class TableScene {
       (r.mesh.material as { dispose?: () => void }).dispose?.();
     }
     this.rings.length = 0;
+    this.sweeping.length = 0; // 掃引中の旧札（materials/geometry は下の traverse が解放）
     this.ringGeo.dispose?.();
     // ドロップ標的・席名ラベル（Canvas テクスチャは traverse が解放しないため明示 dispose・E8）
     this.clearMeldRings();
@@ -1786,6 +2132,14 @@ const TMP_HIT = new THREE.Vector3(); // dropTargetAt の交点用（ポインタ
 /** 値を [lo, hi] に丸める（オービットのズーム/仰角クランプ用）。 */
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** バネ状のオーバーシュート（決めアクションの出現に躍動を与える・Q12）。t:0→1 で 0→1（途中で >1）。 */
+function easeOutBack(t: number): number {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  const u = t - 1;
+  return 1 + c3 * u * u * u + c1 * u * u;
 }
 
 function hashId(id: string): number {

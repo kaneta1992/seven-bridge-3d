@@ -595,12 +595,16 @@ table.score td.win {
   transition: width 0.1s linear;
 }
 
+/* トーストは種別で色・アイコンを弁別する（Q3）。既定は error（赤）。 */
 .toast {
   position: absolute;
   left: 50%;
   top: 68px;
   transform: translate(-50%, -12px);
   z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: var(--danger);
   color: #fff;
   padding: 10px 16px;
@@ -610,9 +614,53 @@ table.score td.win {
   opacity: 0;
   transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.2, 0.9, 0.3, 1.3);
 }
+.toast .ti {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  font-size: 12px;
+  font-weight: 800;
+  flex: none;
+}
+.toast.info {
+  background: #2f6ea5;
+}
+.toast.warn {
+  background: #c98a2a;
+  color: #201603;
+}
+.toast.warn .ti {
+  background: rgba(0, 0, 0, 0.22);
+}
+.toast.error {
+  background: var(--danger);
+}
 .toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+/* モーダル/ポップアップの退場アニメ（Q7・入退対称）。JS が leaving を付与し ~220ms 後に除去する。 */
+.center.leaving {
+  animation: fade-out 0.2s ease forwards;
+}
+.center.leaving .modal {
+  animation: modal-out 0.2s cubic-bezier(0.4, 0, 0.7, 0.3) forwards;
+}
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes modal-out {
+  to {
+    opacity: 0;
+    transform: translateY(14px) scale(0.95);
+  }
 }
 
 .result .rank {
@@ -1010,6 +1058,219 @@ table.score td.win {
   .seg.tabs button {
     font-size: 12.5px;
   }
+}
+
+/* ==========================================================================
+   タイトル画面（U4）: 背景で3D卓のデモ対局が回り続け、その上に NieR:Automata 風の
+   ミニマル・エレガントなUI（彩度を抑えた生成り×墨色・細罫線・幾何学的な枠・余白の効いた
+   タイポ・抑制的なホバー反転・うっすらしたグレイン）を重ねる。既存フェルト緑/金と調和させる翻案。
+   すべて .title-screen スコープで、ゲーム中HUDには波及しない。
+   ========================================================================== */
+#demo-scene {
+  position: absolute;
+  inset: 0;
+  z-index: 0; /* ロビー（.center=20）の後ろ */
+}
+.endscreen {
+  /* 終端画面の安定コンテナ（Q13）。中の .center が絶対配置で全面を占める。 */
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+.endscreen > * {
+  pointer-events: auto;
+}
+
+.title-screen {
+  --ink: #23201a;
+  --ink-2: #3b362d;
+  --paper: #d9d3c4;
+  --paper-2: #cfc8b6;
+  --paper-dim: rgba(35, 32, 26, 0.62);
+  --hair: rgba(35, 32, 26, 0.5);
+}
+/* うっすらしたフィルムグレイン（プロシージャル SVG feTurbulence・外部アセットなし）。3D の上・パネルの下。 */
+.title-screen::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 140px 140px;
+}
+/* 背景（デモ卓）を見せるため中央は明るく、周縁を落として文字を読みやすくする。 */
+.title-screen .center.lobby-center {
+  background: radial-gradient(120% 95% at 50% 42%, rgba(8, 10, 8, 0.18), rgba(5, 7, 6, 0.62) 100%);
+  backdrop-filter: none;
+}
+/* 生成りの紙パネル。角を抑え、細い墨の内枠（NieR風の二重罫）で囲う。 */
+.title-screen .modal.lobby {
+  background: linear-gradient(180deg, rgba(217, 211, 196, 0.94), rgba(205, 199, 183, 0.92));
+  color: var(--ink);
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.62);
+  overflow: visible;
+}
+.title-screen .modal.lobby::before {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  height: auto;
+  background: none;
+  border: 1px solid rgba(35, 32, 26, 0.22);
+  border-radius: 1px;
+  pointer-events: none;
+}
+/* ブランド: マークは細い墨の四角枠、タイトルは彩度を抑えた墨色で字間を広げる。 */
+.title-screen .lobby-brand {
+  border-bottom: 1px solid var(--hair);
+  padding-bottom: 16px;
+}
+.title-screen .lobby-mark {
+  background: none;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  box-shadow: none;
+}
+.title-screen .lobby-mark .pip.s {
+  color: var(--ink);
+}
+.title-screen .lobby-mark .pip.h {
+  color: #9a6b1e;
+}
+.title-screen .lobby-title h1 {
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  color: var(--ink);
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.title-screen .lobby-title .lobby-sub {
+  color: var(--paper-dim);
+  letter-spacing: 0.04em;
+}
+.title-screen .modal.lobby h2 {
+  color: var(--ink-2);
+  letter-spacing: 0.06em;
+}
+/* タブ: 罫線のみ。選択は墨で反転（塗り→生成り字）。 */
+.title-screen .seg.tabs {
+  background: none;
+  border: 1px solid var(--hair);
+  border-radius: 2px;
+  padding: 3px;
+  gap: 3px;
+}
+.title-screen .seg.tabs button {
+  color: var(--ink-2);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 1px;
+  box-shadow: none;
+  letter-spacing: 0.03em;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.title-screen .seg.tabs button.on {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+  box-shadow: none;
+}
+/* 汎用ボタン: 細い墨枠 + 余白。ホバーで墨に反転。光沢/波紋は使わない（抑制的インタラクション）。 */
+.title-screen button {
+  background: none;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  box-shadow: none;
+  letter-spacing: 0.05em;
+  transition: background 0.16s ease, color 0.16s ease, letter-spacing 0.16s ease;
+}
+.title-screen button::after {
+  display: none;
+}
+@media (hover: hover) {
+  .title-screen button:hover:not(:disabled) {
+    transform: none;
+    filter: none;
+    background: var(--ink);
+    color: var(--paper);
+    box-shadow: none;
+  }
+  .title-screen .seg.tabs button:hover:not(.on) {
+    background: rgba(35, 32, 26, 0.1);
+    color: var(--ink);
+  }
+}
+.title-screen button:active:not(:disabled) {
+  transform: none;
+  filter: brightness(0.94);
+}
+/* 主ボタン: 墨の塗り→ホバーで枠のみへ反転（入退対称の抑制されたトグル感）。 */
+.title-screen button.primary {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+  font-weight: 700;
+}
+@media (hover: hover) {
+  .title-screen button.primary:hover:not(:disabled) {
+    background: none;
+    color: var(--ink);
+    letter-spacing: 0.12em;
+  }
+}
+.title-screen .seg button.on {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+/* 入力: 下罫線だけの極薄フィールド。 */
+.title-screen input[type="text"] {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--ink);
+  border: 1px solid var(--hair);
+  border-radius: 2px;
+}
+.title-screen input[type="text"]::placeholder {
+  color: rgba(35, 32, 26, 0.4);
+}
+.title-screen input[type="text"]:focus {
+  outline: none;
+  border-color: var(--ink);
+  box-shadow: 0 1px 0 0 var(--ink);
+}
+.title-screen .modal.lobby .field > label {
+  color: var(--paper-dim);
+  letter-spacing: 0.08em;
+}
+.title-screen .hint {
+  color: var(--paper-dim);
+}
+/* 公開ルーム行・ピル: 紙テーマへ。 */
+.title-screen .melds {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--hair);
+  border-radius: 2px;
+}
+.title-screen .meld {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--hair);
+  border-radius: 2px;
+}
+.title-screen .meld .owner {
+  color: var(--ink-2);
+}
+.title-screen .pill {
+  background: rgba(35, 32, 26, 0.08);
+  border: 1px solid var(--hair);
+  color: var(--ink-2);
 }
 
 /* アクセシビリティ: 動きの抑制設定を尊重（派手なアニメを穏やかに）。E6 */

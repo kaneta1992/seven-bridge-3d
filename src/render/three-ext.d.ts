@@ -15,6 +15,7 @@ declare module 'three' {
   export class Float32BufferAttribute { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class RingGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class BoxGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class ConeGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Plane { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Sprite { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class SpriteMaterial { [k: string]: AnyX; constructor(...a: AnyX[]); }

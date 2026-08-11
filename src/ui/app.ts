@@ -22,7 +22,8 @@ import { LobbyLink } from '../net/lobbyChannel';
 import { NetSession } from '../net/session';
 import { createTrysteroTransport } from '../net/trysteroTransport';
 import { orderedMeldCards } from '../render/meldSort';
-import { TableScene } from '../render/scene';
+import { DEAL_STEP_MS, TableScene } from '../render/scene';
+import { DemoTable } from './demoTable';
 import { SUIT_COLOR, SUIT_GLYPH } from '../render/suitStyle';
 import { AudioKit } from './audio';
 import { Callouts, countUp } from './callout';
@@ -117,6 +118,13 @@ export class GameUI {
   private lastClaimCard: Card | null = null;
   private celebratedRound = -1;
   private celebratedGameOver = false;
+  private claimFocusOn = false; // 鳴きウィンドウの3Dハイライト表示中か（Q11）
+  // タイトル背景のデモ対局（U4）。ロビー表示中のみ生存。
+  private demo: DemoTable | null = null;
+  // 終端画面（roundOver/gameOver）の安定コンテナ（Q13）。overlay の毎 render 作り直しから独立させ、
+  // 同じ局面では入場アニメ/カウントアップが再生し直さない。
+  private endEl: HTMLElement | null = null;
+  private endKey = '';
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -134,12 +142,19 @@ export class GameUI {
 
   private onResize = (): void => {
     this.scene?.resize();
+    this.demo?.resize();
     if (this.driver) this.renderScene(this.orderedView());
     this.layoutFan(); // 扇形手札を新しいビューポート幅へ再配置
   };
 
   private onVisibility = (): void => {
-    if (document.visibilityState === 'visible') this.session?.recover();
+    // タブ非表示で BGM/音を止める（E3）。可視復帰で再開し、通信セッションも回復する。
+    if (document.visibilityState === 'visible') {
+      this.audio?.resume();
+      this.session?.recover();
+    } else {
+      this.audio?.suspend();
+    }
   };
 
   private roomFromUrl(): string | null {
@@ -186,7 +201,16 @@ export class GameUI {
     this.teardownGame();
     this.teardownNet();
     clear(this.root);
-    const lobby = el('div', {});
+    // タイトル背景の3Dデモ対局（U4）: ロビーの後ろで卓のデモが自動進行し、演出的カメラで眺めのよい画に。
+    // メニュー操作中も回り続ける。UI層のボットが LocalDriver の公開APIのみでランダム合法手を打つ。
+    const demoHost = el('div', { id: 'demo-scene' });
+    this.root.append(demoHost);
+    try {
+      this.demo = new DemoTable(demoHost);
+    } catch {
+      this.demo = null; // WebGL 不可等でもロビーは出す（背景なしにフォールバック）
+    }
+    const lobby = el('div', { class: 'title-screen' });
     this.root.append(lobby);
     renderLobby(lobby, {
       onHotseat: (r) => this.startHotseat(r),
@@ -222,7 +246,13 @@ export class GameUI {
     renderNotice(this.root, title, message, () => this.showLobby());
   }
 
+  private teardownDemo(): void {
+    this.demo?.dispose();
+    this.demo = null;
+  }
+
   private teardownGame(): void {
+    this.teardownDemo(); // タイトル背景のデモ対局を停止（画面遷移のたびに確実に破棄・U4/E9）
     this.unsub?.();
     this.unsub = null;
     this.scene?.dispose();
@@ -254,6 +284,9 @@ export class GameUI {
     this.handEl = null;
     this.footerEl = null;
     this.controlsEl = null;
+    this.endEl = null;
+    this.endKey = '';
+    this.claimFocusOn = false;
     this.cardEls.clear();
     this.handCards = [];
     this.focusedId = null;
@@ -394,7 +427,7 @@ export class GameUI {
     const info = this.waitInfo;
     if (!info || !this.session) return;
     if (info.members.length < 2) {
-      this.toast('2人以上そろってから開始できます');
+      this.toast('2人以上そろってから開始できます', 'warn');
       return;
     }
     this.session.startGame();
@@ -414,11 +447,23 @@ export class GameUI {
     this.toastEl = el('div', { class: 'toast' });
     this.vignetteEl = el('div', { class: 'vignette' }); // 画面周縁を落とす映画的ビネット（3D品質）
     this.controlsEl = el('div', { class: 'controls' }); // 永続コントロール（項目8）
-    this.root.append(this.sceneHost, this.vignetteEl, this.overlay, this.controlsEl, this.bottomEl, this.toastEl);
+    this.endEl = el('div', { class: 'endscreen' }); // 終端画面の安定コンテナ（Q13）
+    this.endEl.style.display = 'none';
+    this.endKey = '';
+    this.root.append(
+      this.sceneHost,
+      this.vignetteEl,
+      this.overlay,
+      this.controlsEl,
+      this.endEl,
+      this.bottomEl,
+      this.toastEl,
+    );
     this.attachHandContainer(this.handEl);
 
     // SFX とコールアウト層。コールアウトは overlay とは別に root 直下へ（最前面・pointer 透過）。
     this.audio = new AudioKit();
+    this.audio.bgmStart(); // ループBGM開始（未解錠なら初回操作で鳴り始める・Q4）
     this.callouts = new Callouts(this.root);
     this.buildControls(); // 永続ボタン群を一度だけ生成（audio 生成後にミュート状態を反映）
 
@@ -496,9 +541,14 @@ export class GameUI {
       this.lastRound = view.round;
       this.selected.clear();
       this.handOrder = [];
-      // 配札のリズミカルな効果音（3D 側のスタッガ配札に同期）
-      for (let i = 0; i < 12; i++) {
-        this.fxTimers.push(window.setTimeout(() => this.audio?.deal(i), i * 45));
+      // 配札のリズミカルな効果音を実配札に同期（Q9）: 枚数＝実際に配られた札数（自手札＋他家手札）、
+      // 間隔＝3D 側の配札スタッガと同一の DEAL_STEP_MS。固定12回45msの決め打ちを廃止。
+      const dealt =
+        view.hand.length +
+        view.seats.reduce((s, st) => s + (st.index === view.youIndex ? 0 : st.handCount), 0);
+      const count = Math.min(Math.max(dealt, 1), 40);
+      for (let i = 0; i < count; i++) {
+        this.fxTimers.push(window.setTimeout(() => this.audio?.deal(i), i * DEAL_STEP_MS));
       }
     }
     // フェーズ/手番が変わったら選択解除
@@ -553,6 +603,17 @@ export class GameUI {
       this.lastClaimCard = view.claimWindow.card;
     }
 
+    // 鳴きウィンドウ開始/終了の演出（Q11）: 開始で対象捨て札を3Dハイライト + 開始スティンガー音。
+    const windowOpen = view.phase === 'meldWindow' && !!view.claimWindow;
+    if (windowOpen && !this.claimFocusOn) {
+      this.claimFocusOn = true;
+      this.scene.showClaimFocus();
+      this.audio?.claimOpen();
+    } else if (!windowOpen && this.claimFocusOn) {
+      this.claimFocusOn = false;
+      this.scene.hideClaimFocus();
+    }
+
     // 新規メルド → 鳴き（ポン/チー）か自主公開かを判別して決め演出
     for (const m of view.melds) {
       if (this.prevMeldIds.has(m.id)) continue;
@@ -574,9 +635,10 @@ export class GameUI {
     this.prevMeldIds = new Set(view.melds.map((m) => m.id));
     if (view.phase !== 'meldWindow') this.lastClaimCard = null;
 
-    // 捨て札が増えた → 捨て音
+    // 捨て札が増えた → 捨て音 + 着地の手応え（Q2: 砂塵バースト + 微小リング）
     if (this.prevDiscardCount >= 0 && view.discardPile.length > this.prevDiscardCount) {
       this.audio?.discard();
+      this.scene.discardImpact();
     }
     this.prevDiscardCount = view.discardPile.length;
 
@@ -616,12 +678,12 @@ export class GameUI {
   // overlay（上部HUD・メルド・鳴き・モーダル）のみを作り直す。手札は永続コンテナで別管理（項目3）。
   private renderHud(view: PlayerView): void {
     clear(this.overlay);
+    // 終端画面（roundOver/gameOver）は安定コンテナ endEl が担当（Q13）。overlay は毎 render 作り直すため
+    // ここに置くと入場アニメ/カウントアップが再生し直す。endEl は局面キーが変わった時だけ作り直す。
+    this.updateEndScreen(view);
     // 永続コントロールはゲーム終了の結果画面では隠す（結果画面が全面を占めるため）。
     if (this.controlsEl) this.controlsEl.style.display = view.phase === 'gameOver' ? 'none' : '';
-    if (view.phase === 'gameOver') {
-      this.overlay.append(this.buildResult(view));
-      return;
-    }
+    if (view.phase === 'gameOver') return; // 上部HUDは出さない（結果画面が全面）
     this.overlay.append(this.buildTopbar(view));
     this.overlay.append(this.buildMelds(view));
     // 鳴き選択UI・カウントダウンは鳴ける本人にのみ表示（項目3・秘匿）。非対象者にはパネルを出さない。
@@ -630,9 +692,23 @@ export class GameUI {
     if (view.phase === 'meldWindow' && this.amClaimant(view)) {
       this.overlay.append(this.buildClaimPanel(view));
     }
-    if (view.phase === 'roundOver') {
-      this.overlay.append(this.buildRoundOver(view));
+  }
+
+  // 終端画面の安定化（Q13）: 局面キー（gameOver / roundOver:ラウンド）が変わった時だけ endEl を作り直す。
+  // 同一局面での再 render では DOM を保持し、入場アニメ・カウントアップを再生し直さない。
+  private updateEndScreen(view: PlayerView): void {
+    if (!this.endEl) return;
+    const key =
+      view.phase === 'gameOver' ? 'go' : view.phase === 'roundOver' ? `ro:${view.round}` : '';
+    if (key === this.endKey) return;
+    this.endKey = key;
+    clear(this.endEl);
+    if (key === '') {
+      this.endEl.style.display = 'none';
+      return;
     }
+    this.endEl.style.display = '';
+    this.endEl.append(view.phase === 'gameOver' ? this.buildResult(view) : this.buildRoundOver(view));
   }
 
   // 永続コントロール（スコア票/ミュート/視点リセット）を一度だけ構築する（項目8）。overlay の
@@ -855,12 +931,9 @@ export class GameUI {
         );
       }
     } else if (myTurn && view.phase === 'awaitingDiscard') {
+      // ヒントは簡潔に。詳細な操作は光るドロップ標的・ボタンの視覚アフォーダンスが示す（Q14）。
       hint.textContent =
-        sel.length === 0
-          ? 'カードを上へドラッグ（場=メルド公開／捨て札=捨てる）、メルドへドロップで付け札。ボタンも可。'
-          : sel.length === 1
-            ? '「捨てる」か、場のメルドへドラッグ/タップで付け札。'
-            : '「メルド公開」または選択カードを場へドラッグで公開。';
+        sel.length === 0 ? '上へドラッグして出す' : sel.length === 1 ? 'ドラッグで捨てる／付け札' : 'ドラッグでメルド公開';
       const canPublishSel = (sel.length === 1 && sel[0]!.rank === 7) || sel.length >= 3;
       const meldBtn = el('button', { text: 'メルド公開' }) as HTMLButtonElement;
       meldBtn.disabled = !canPublishSel;
@@ -1354,11 +1427,18 @@ export class GameUI {
     return el('div', { class: 'center' }, [modal]);
   }
 
+  // モーダルの退場アニメ（Q7・入退対称）: leaving クラスで退場を再生してから DOM を除去する。
+  private dismissCenter(node: Element | null): void {
+    if (!node || node.classList.contains('leaving')) return;
+    node.classList.add('leaving');
+    window.setTimeout(() => node.remove(), 220);
+  }
+
   private openScoreModal(view: PlayerView): void {
     // トグル動作: 既に開いていれば閉じるだけ（連打での多重スタックを防ぐ・2026-08-11）
     const existing = this.root.querySelector('.center .modal .score-wrap')?.closest('.center');
     if (existing) {
-      existing.remove();
+      this.dismissCenter(existing);
       return;
     }
     const modal = el('div', { class: 'modal' }, [
@@ -1368,10 +1448,10 @@ export class GameUI {
     ]);
     const close = el('button', { text: '閉じる' });
     const overlay = el('div', { class: 'center' }, [modal]);
-    close.onclick = () => overlay.remove();
+    close.onclick = () => this.dismissCenter(overlay);
     modal.append(el('div', { class: 'row' }, [close]));
     overlay.onclick = (e) => {
-      if (e.target === overlay) overlay.remove();
+      if (e.target === overlay) this.dismissCenter(overlay);
     };
     this.root.append(overlay);
   }
@@ -1381,7 +1461,7 @@ export class GameUI {
   private openDiscardHistory(): void {
     const existing = this.root.querySelector('.center .modal .discard-list')?.closest('.center');
     if (existing) {
-      existing.remove();
+      this.dismissCenter(existing);
       return;
     }
     const view = this.currentView();
@@ -1410,10 +1490,10 @@ export class GameUI {
     modal.append(listEl);
     const close = el('button', { text: '閉じる' });
     const overlay = el('div', { class: 'center' }, [modal]);
-    close.onclick = () => overlay.remove();
+    close.onclick = () => this.dismissCenter(overlay);
     modal.append(el('div', { class: 'row' }, [close]));
     overlay.onclick = (e) => {
-      if (e.target === overlay) overlay.remove();
+      if (e.target === overlay) this.dismissCenter(overlay);
     };
     this.root.append(overlay);
   }
@@ -1446,14 +1526,19 @@ export class GameUI {
         if (r.ok) return;
       }
     }
-    this.toast('鳴きに使える手札の組がありません');
+    this.toast('鳴きに使える手札の組がありません', 'warn');
   }
 
   private async dispatch(action: Action, onOk?: () => void): Promise<void> {
     this.audio?.click(); // ボタン/操作の即時フィードバック音
     const r = await this.driver!.dispatch(action);
-    if (r.ok) onOk?.();
-    else this.toast(this.friendlyError(action, r.error));
+    if (r.ok) {
+      if (action.type === 'attach') this.audio?.attach(); // 付け札成立音（Q10）
+      onOk?.();
+    } else {
+      this.audio?.error(); // 操作拒否のブザー（成功/失敗の聴覚弁別・Q10）
+      this.toast(this.friendlyError(action, r.error), 'error');
+    }
   }
 
   private friendlyError(action: Action, raw: string): string {
@@ -1521,10 +1606,14 @@ export class GameUI {
 
   // ---- トースト ----------------------------------------------------------
 
-  private toast(msg: string): void {
+  // トーストは種別で色・アイコンを分ける（Q3）: info=青/ℹ・warn=琥珀/⚠・error=赤/✕。
+  private toast(msg: string, level: 'info' | 'warn' | 'error' = 'error'): void {
     if (!this.toastEl) return;
-    this.toastEl.textContent = msg;
-    this.toastEl.classList.add('show');
+    const icon = level === 'error' ? '✕' : level === 'warn' ? '⚠' : 'ℹ';
+    clear(this.toastEl);
+    this.toastEl.append(el('span', { class: 'ti', text: icon }), el('span', { text: msg }));
+    this.toastEl.classList.remove('info', 'warn', 'error');
+    this.toastEl.classList.add('show', level);
     clearTimeout(this.toastTimer);
     this.toastTimer = window.setTimeout(() => this.toastEl?.classList.remove('show'), 2200);
   }

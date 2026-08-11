@@ -3,18 +3,33 @@
 // 生成に失敗する環境（WebAudio 非対応）では全メソッドが安全に no-op になる。
 const MUTE_KEY = 'sb_muted';
 
+// ループBGMの和音進行（Am–F–C–G 相当・落ち着いた3声パッド。各要素は [低音, 中音, 高音] Hz）。
+const BGM_CHORDS: [number, number, number][] = [
+  [110.0, 164.81, 220.0], // Am
+  [87.31, 130.81, 174.61], // F
+  [65.41, 130.81, 196.0], // C
+  [98.0, 146.83, 196.0], // G
+];
+
 export class AudioKit {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private muted: boolean;
   private noiseBuf: AudioBuffer | null = null;
+  // ループBGM（Q4・プロシージャル）: パッド3声 + まばらなアルペジオ。bgmGain→master でミュート連動。
+  private bgmGain: GainNode | null = null;
+  private bgmOscs: OscillatorNode[] = [];
+  private bgmTimer = 0;
+  private bgmStep = 0;
+  private bgmOn = false;
 
   constructor() {
     this.muted = localStorage.getItem(MUTE_KEY) === '1';
-    // 初回のユーザー操作で解錠（autoplay 制限の回避）。一度だけ。
+    // 初回のユーザー操作で解錠（autoplay 制限の回避）。一度だけ。BGM が要求済みなら解錠時に鳴らし始める。
     const unlock = (): void => {
       this.ensure();
       void this.ctx?.resume();
+      if (this.bgmOn) this.bgmStart();
       window.removeEventListener('pointerdown', unlock);
       window.removeEventListener('keydown', unlock);
     };
@@ -34,6 +49,7 @@ export class AudioKit {
   }
 
   dispose(): void {
+    this.bgmStop();
     try {
       void this.ctx?.close();
     } catch {
@@ -42,6 +58,98 @@ export class AudioKit {
     this.ctx = null;
     this.master = null;
     this.noiseBuf = null;
+  }
+
+  // ---- ループBGM + 環境音（Q4・E3: autoplay 解錠と統合・タブ非表示で停止・ミュート連動） ----
+
+  /** BGM を開始（未解錠なら bgmOn を立て、初回操作の解錠時に鳴り始める）。二重起動しない。 */
+  bgmStart(): void {
+    this.bgmOn = true;
+    if (this.bgmOscs.length > 0) return; // 既に鳴っている
+    if (!this.ensure()) return;
+    const ctx = this.ctx!;
+    const g = ctx.createGain();
+    g.gain.value = 0.0001;
+    g.connect(this.master!);
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = 760;
+    filt.Q.value = 0.5;
+    filt.connect(g);
+    this.bgmGain = g;
+    const chord = BGM_CHORDS[0]!;
+    for (let i = 0; i < 3; i++) {
+      const o = ctx.createOscillator();
+      o.type = i === 0 ? 'triangle' : 'sine';
+      o.frequency.value = chord[i]!;
+      const og = ctx.createGain();
+      og.gain.value = i === 0 ? 0.16 : 0.1;
+      o.connect(og).connect(filt);
+      o.start();
+      this.bgmOscs.push(o);
+    }
+    // 静かに立ち上げる（音量控えめ）。ミュート中は 0 のまま。
+    g.gain.setTargetAtTime(this.muted ? 0.0001 : 0.14, ctx.currentTime, 1.6);
+    this.bgmStep = 0;
+    this.bgmTimer = window.setInterval(() => this.bgmTick(), 2600);
+    this.bgmTick();
+  }
+
+  /** BGM を停止（フェードアウトして発振停止）。 */
+  bgmStop(): void {
+    this.bgmOn = false;
+    if (this.bgmTimer) {
+      clearInterval(this.bgmTimer);
+      this.bgmTimer = 0;
+    }
+    const ctx = this.ctx;
+    if (ctx && this.bgmGain) this.bgmGain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.15);
+    const stopAt = ctx ? ctx.currentTime + 0.45 : 0;
+    for (const o of this.bgmOscs) {
+      try {
+        o.stop(stopAt);
+      } catch {
+        /* noop */
+      }
+    }
+    this.bgmOscs = [];
+    this.bgmGain = null;
+  }
+
+  /** タブ非表示で BGM/音を止める（E3）。可視復帰で resume。 */
+  suspend(): void {
+    try {
+      void this.ctx?.suspend();
+    } catch {
+      /* noop */
+    }
+  }
+
+  resume(): void {
+    try {
+      void this.ctx?.resume();
+    } catch {
+      /* noop */
+    }
+  }
+
+  private bgmTick(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.bgmOn || this.bgmOscs.length < 3) return;
+    if (typeof document !== 'undefined' && document.hidden) return; // 非表示中は進めない
+    const chord = BGM_CHORDS[this.bgmStep % BGM_CHORDS.length]!;
+    const t = ctx.currentTime;
+    for (let i = 0; i < 3; i++) {
+      try {
+        this.bgmOscs[i]!.frequency.exponentialRampToValueAtTime(Math.max(1, chord[i]!), t + 1.8);
+      } catch {
+        /* noop */
+      }
+    }
+    // まばらな環境アルペジオ（和音の高声を1オクターブ上げ、そっと）。ミュート時は live() が止める。
+    this.tone(chord[2]! * 2, 1.1, 'sine', 0.045, 0.2);
+    if (this.bgmStep % 2 === 1) this.tone(chord[1]! * 2, 0.9, 'sine', 0.035, 0.7);
+    this.bgmStep++;
   }
 
   private ensure(): boolean {
@@ -171,5 +279,25 @@ export class AudioKit {
   /** ボタン押下（クリック）。 */
   click(): void {
     this.tone(760, 0.05, 'square', 0.08, 0, 900);
+  }
+
+  /** 付け札成立（軽やかな確定音・上行2音＋ノイズの「かちっ」・Q10）。 */
+  attach(): void {
+    this.tone(700, 0.1, 'triangle', 0.14);
+    this.tone(1050, 0.14, 'triangle', 0.13, 0.05);
+    this.noise(0.05, 0.16, 3200, 0, 1.4);
+  }
+
+  /** エラー/操作拒否（低い下行のブザー・Q10）。成功音と聴覚で弁別できる。 */
+  error(): void {
+    this.tone(220, 0.18, 'sawtooth', 0.16, 0, 150);
+    this.tone(160, 0.22, 'square', 0.12, 0.04, 110);
+  }
+
+  /** 鳴きウィンドウ開始スティンガー（緊張を告げる短い上昇音・Q11）。 */
+  claimOpen(): void {
+    this.tone(520, 0.12, 'triangle', 0.15, 0, 780);
+    this.tone(784, 0.16, 'sine', 0.12, 0.07);
+    this.noise(0.12, 0.12, 1400, 0, 0.7);
   }
 }
