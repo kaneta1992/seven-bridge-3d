@@ -22,6 +22,10 @@ const HAND_SPACING = 0.52;
 const EASE_SPEED = 7.5; // 補間の速さ（大きいほど機敏）
 export const DEAL_STEP_MS = 42; // 配札スタッガ（1枚ごとの遅延・app.ts の配札SFX同期で共有・Q9）
 const ENTRANCE_MS = 340; // 出現アニメ時間（easeOutBack のバネ・オーバーシュート・Q6/Q12）
+// タイトル背景のシネマデモの負荷制限（契約19項目3: 発熱/負荷対策）。常時60fpsでの全品質描画が主要な発熱源。
+// 背景（UIの後ろ）なので~32fps・低DPRでも体感差はほぼ無く、GPU/CPU負荷を大きく下げられる。
+const CINE_FRAME_MIN = 1 / 32; // シネマ時の最小フレーム間隔（秒）＝約32fpsに間引く
+const CINE_DPR_CAP = 1.0; // シネマ時のDPR上限（背景なので等倍で十分）
 const SWEEP_MS = 420; // ラウンド遷移の旧札掃引退場の時間（Q1）
 const MAX_RINGS = 10; // 光輪（ショックウェーブ）の同時上限（派手化で二重リングを出すため増量・契約09項目2）
 const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の中心（update と一致）
@@ -142,14 +146,21 @@ export class TableScene {
   private spotPosGoal = new THREE.Vector3(0, 9, 0.5);
   private spotTargetGoal = new THREE.Vector3(0, 0, 0);
   private camKick = 0; // カメラパンチの残量（減衰）
+  private camShakeScale = 1; // 現行パンチのシェイク倍率（他家起因は明確に弱める・契約19項目2）
   private freshDeal = false; // clearCards 直後の一括配札（スタッガ演出）
   private ringGeo!: THREE.RingGeometry;
   private rings: { mesh: THREE.Mesh; t: number; dur: number; r0: number; r1: number; op: number }[] = [];
   // ラウンド遷移の旧札掃引退場（Q1）。clearCards が現行カードをここへ移し、loop がフェード+掃引で消す。
   private sweeping: { group: THREE.Group; mats: THREE.Material[]; born: number; to: THREE.Vector3 }[] = [];
-  // タイトル背景のデモ対局用シネマティックカメラ（U4）。true の間は自動でゆっくり周回し idle しない。
+  // タイトル背景のデモ対局用シネマティックカメラ（U4/契約19項目5）。true の間は複数のカメラカット
+  // （ドリーイン/アウト・ロー/ハイアングル・卓面すれすれのトラッキング等）を黒フェードで切り替えて
+  // ループする。idle しない。
   private cinematic = false;
-  private cineT = 0;
+  private cineShotIdx = 0;
+  private cineShotT = 0; // 現在カットの経過秒
+  private cineBaseYaw = 0; // カットごとにずらす基準方位
+  private cineFadeEl: HTMLElement | null = null; // カット境界の黒フェード（デモ卓の上・タイトルUIの下）
+  private cineFrameAccum = 0; // シネマ間引き用の経過時間アキュムレータ（契約19項目3）
   // ドロップ光枠のフェードアウト（Q15）。hideDropTargets は即消しでなくここでフェードしてから片付ける。
   private dropHiding = false;
   private dropHideAt = 0;
@@ -713,9 +724,11 @@ export class TableScene {
     obj.spawned = true;
     obj.group.position.lerp(obj.targetPos, k);
     obj.group.quaternion.slerp(obj.targetQuat, k);
-    // 不透明度: 退場0 / 遮蔽0 / 通常1 へ速めに追従（フェードイン/アウト統一・線形縮小の廃止）。
+    // 不透明度: 退場0 / 遮蔽0 / 通常1 へ追従。出現（フェードイン）は速めにして、短い飛翔（付け札/メルド公開）
+    // でも「操作者の手元→場」の移動中にカードが見えるようにする（契約19項目1: 移動が消滅に見えないよう）。
+    // 退場/遮蔽のフェードアウトは従来どおり穏やか（ちらつき防止）。
     const targetOp = obj.removing ? 0 : obj.occluded ? 0 : 1;
-    const ko = Math.min(1, k * 1.7);
+    const ko = Math.min(1, k * (targetOp > obj.opacity ? 2.9 : 1.7));
     let busy = false;
     if (Math.abs(obj.opacity - targetOp) > 0.002) {
       obj.opacity += (targetOp - obj.opacity) * ko;
@@ -823,6 +836,11 @@ export class TableScene {
     const now = performance.now();
     const seatIndexById = new Map<string, number>();
     view.seats.forEach((s) => seatIndexById.set(s.id, s.index));
+    // 公開/付け札の操作者席（＝現手番席）。新規メルドカードの飛翔スポーン元に使う（契約19項目1）。
+    // メルド所有者(meld.owner)ではなく「今このカードを場に出した席」から飛ばすのが正しい: 付け札は
+    // 他家メルドへ自分の手から付けるため、owner基準だと別席の手から湧いて「カード消滅/瞬間移動」に見える。
+    // 公開時は owner==現手番なので従来どおり所有者の手から出る（回帰なし）。
+    const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
 
     const desired = new Set<string>();
     // 卓上の中央ゾーン再設計（改善R3 項目1・2）: 山札と捨て札を中央付近へコンパクトに寄せ、
@@ -863,9 +881,9 @@ export class TableScene {
       // メルド配置（契約18項目4: 同一メルドは1行・収まらなければ縮小）。自席は付け札のため内側バンドへ寄せる。
       const layout = layoutSeatMelds(this.seatCount, dir.x, inputs, seat === this.viewYou);
       const halfW = (Math.max(CARD_W, CARD_H) / 2) * layout.scale;
-      // 公開/付け札で新規に現れるメルドカードは、所有者席の手（自席=2D手札位置 / 他家=空中手札）から
-      // 飛ばす（契約14項目5）。既存カードの再配置では spawnPos は無視されるため軌跡に影響しない。
-      const meldSpawn = this.actorSpot(seat);
+      // 公開/付け札で新規に現れるメルドカードは、操作者席（現手番＝curSeat）の手（自席=2D手札位置 /
+      // 他家=空中手札）から飛ばす（契約14項目5・契約19項目1）。既存カードの再配置では spawnPos は無視される。
+      const meldSpawn = this.actorSpot(curSeat);
       for (const slot of layout.slots) {
         const card = orderedById.get(slot.meldId)?.[slot.index];
         if (!card) continue;
@@ -939,8 +957,7 @@ export class TableScene {
     // カメラを現手番（=youIndex）席の背後へ演出移動。ただしユーザーが視点を操作中は勝手に戻さない
     // （契約07項目1: リセットはユーザー操作で。ラウンド切替=clearCards で自動的に既定へ復帰する）。
     if (!this.userControlled && !this.cinematic) this.aimCameraAt(view.youIndex);
-    // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る）
-    const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
+    // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る・curSeat は上で算出）
     this.setActiveSeat(curSeat);
     this.prevCurSeat = curSeat; // 次フレームの捨て札出所推定に使う（項目5）
     this.updateLabels(view); // 席名ビルボード（手番強調はテクスチャ再生成で反映）
@@ -1135,14 +1152,76 @@ export class TableScene {
     this.wake();
   }
 
-  /** タイトル背景のデモ対局用: シネマティックカメラの有効化（U4）。 */
+  /** タイトル背景のデモ対局用: シネマティックカメラの有効化（U4/契約19項目5）。 */
   setCinematic(on: boolean): void {
     this.cinematic = on;
     if (on) {
       this.userControlled = false;
-      this.cineT = 0;
+      this.cineShotIdx = 0;
+      this.cineShotT = 0;
+      this.cineBaseYaw = Math.random() * Math.PI * 2;
+      // 初期カットの開始画をセットし、位置をスナップ（冒頭は黒フェードインなのでスナップは見えない）。
+      this.cineShots[0]!.cam(0, this.cineBaseYaw, this.camPosGoal, this.camTargetGoal);
+      this.camPos.copy(this.camPosGoal);
+      this.camTarget.copy(this.camTargetGoal);
+      if (!this.cineFadeEl) {
+        const f = document.createElement('div');
+        // デモ卓（canvas）の上に重なる黒幕。タイトルUI（root 直下の別要素・高い z-index）の下に留まる。
+        f.style.cssText = 'position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:1;';
+        this.container.appendChild(f);
+        this.cineFadeEl = f;
+      }
+      this.resize(); // シネマ用の低DPRを即時適用（契約19項目3）
     }
     this.wake();
+  }
+
+  /** シネマカット用のオービット座標（yaw/pitch/半径 → ワールド位置）。 */
+  private cineOrbit(yaw: number, pitch: number, r: number, out: THREE.Vector3): void {
+    const cp = Math.cos(pitch);
+    out.set(r * cp * Math.cos(yaw), r * Math.sin(pitch), r * cp * Math.sin(yaw));
+  }
+
+  // シネマティックのカット定義（契約19項目5）。各カットは尺 dur 秒、u=0..1 の局所進行でカメラ位置(pos)/
+  // 注視点(target)を決める。卓中心は原点付近。ドリー・ロー/ハイアングル・卓面トラッキングを織り交ぜる。
+  private readonly cineShots: {
+    dur: number;
+    cam: (u: number, baseYaw: number, pos: THREE.Vector3, target: THREE.Vector3) => void;
+  }[] = [
+    // 1. 高めの俯瞰をゆっくり周回（establishing）。
+    { dur: 11, cam: (u, y, p, t) => { this.cineOrbit(y + u * 0.5, 0.64, 8.8, p); t.set(0, 0.1, 0); } },
+    // 2. 卓面すれすれのロー・トラッキング（横へ流す）。
+    { dur: 8, cam: (u, y, p, t) => { this.cineOrbit(y + 0.5 + u * 0.55, 0.11, 5.6, p); t.set(0, 0.32, 0); } },
+    // 3. ハイアングルの見下ろし（ゆっくり回す）。
+    { dur: 8, cam: (u, y, p, t) => { this.cineOrbit(y - 0.35 + u * 0.4, 1.14, 7.4, p); t.set(0, 0, 0); } },
+    // 4. ドリーイン（寄り）。
+    { dur: 7, cam: (u, y, p, t) => { this.cineOrbit(y + 1.2, 0.5, 9.4 - u * 4.4, p); t.set(0, 0.12, 0); } },
+    // 5. ドリーアウト（引き）＋僅かに回す。
+    { dur: 9, cam: (u, y, p, t) => { this.cineOrbit(y + 2.1 + u * 0.22, 0.42, 5.2 + u * 4.6, p); t.set(0, 0.15, 0); } },
+  ];
+
+  /** 毎フレームのシネマ更新: カット進行・境界での黒フェードとスナップ切替（契約19項目5）。 */
+  private stepCinematic(dt: number): void {
+    this.cineShotT += dt;
+    let shot = this.cineShots[this.cineShotIdx]!;
+    if (this.cineShotT >= shot.dur) {
+      // カット切替。黒フェード最中（fade≈1）に位置をスナップ＝スウィープでなく「カット」になる。
+      this.cineShotT = 0;
+      this.cineShotIdx = (this.cineShotIdx + 1) % this.cineShots.length;
+      this.cineBaseYaw += 1.7; // カットごとに方位をずらし単調さを避ける
+      shot = this.cineShots[this.cineShotIdx]!;
+      shot.cam(0, this.cineBaseYaw, this.camPosGoal, this.camTargetGoal);
+      this.camPos.copy(this.camPosGoal);
+      this.camTarget.copy(this.camTargetGoal);
+    } else {
+      shot.cam(this.cineShotT / shot.dur, this.cineBaseYaw, this.camPosGoal, this.camTargetGoal);
+    }
+    // カット境界の黒フェード: 冒頭 fadeDur 秒でフェードイン、末尾 fadeDur 秒でフェードアウト。
+    const fadeDur = 0.6;
+    let fade = 0;
+    if (this.cineShotT < fadeDur) fade = 1 - this.cineShotT / fadeDur;
+    else if (this.cineShotT > shot.dur - fadeDur) fade = (this.cineShotT - (shot.dur - fadeDur)) / fadeDur;
+    if (this.cineFadeEl) this.cineFadeEl.style.opacity = clamp(fade, 0, 1).toFixed(3);
   }
 
   /** 手札 D&D の開始/終了を通知する。ドラッグ中はキャンバスのカメラ操作を無視する（項目10）。 */
@@ -1523,6 +1602,7 @@ export class TableScene {
 
   /** メルド公開の決め演出: 金色の大型スパーク + 二重光輪 + 打ち上げの粉塵 + カメラパンチ（契約09項目2）。 */
   publishEffect(seatIndex: number): void {
+    const self = seatIndex === this.viewYou; // 自分の公開か（他家起因は揺れを明確に弱める・契約19項目2）
     const p = this.seatSpot(seatIndex);
     // 発光スパーク（数・初速・寿命を増強）+ 上方へ吹き上げる金の火の粉
     this.particles.burst(p, { count: 52, color: [1, 0.85, 0.4], speed: 3.0, size: 0.13, life: 0.95 });
@@ -1530,12 +1610,14 @@ export class TableScene {
     // 二重光輪（芯の速いリング + 外へ広がる余波リング）
     this.spawnRing(p, '#ffe6a0', { r1: 2.2, dur: 0.5, opacity: 1.0 });
     this.spawnRing(p, '#ffd873', { r1: 3.4, dur: 0.8, opacity: 0.7, delay: 0.09 });
-    this.cameraPunch(0.7);
+    // 自分の公開はやや弱め、他家の公開は明確に控えめ（ドリー量・横揺れとも大幅に低減）。
+    this.cameraPunch(self ? 0.6 : 0.22, self ? 0.8 : 0.18);
     this.wake();
   }
 
   /** ポン/チーの鳴き演出: 種別で色分けした大型スパーク + 二重光輪 + 強めのカメラパンチ（契約09項目2）。 */
   claimEffect(seatIndex: number, kind: 'pon' | 'chi'): void {
+    const self = seatIndex === this.viewYou; // 他家の鳴きも起因が自分でなければ揺れを控えめに（契約19項目2）
     const p = this.seatSpot(seatIndex);
     const color: [number, number, number] = kind === 'pon' ? [1, 0.45, 0.3] : [0.4, 0.72, 1];
     const ringA = kind === 'pon' ? '#ff9a6a' : '#8fd0ff';
@@ -1544,7 +1626,7 @@ export class TableScene {
     this.particles.burst(p, { count: 24, color, speed: 5.0, size: 0.09, life: 0.7, spread: 0.2, gravity: 0.5 });
     this.spawnRing(p, ringA, { r1: 2.4, dur: 0.5, opacity: 1.0 });
     this.spawnRing(p, ringB, { r1: 3.8, dur: 0.85, opacity: 0.7, delay: 0.1 });
-    this.cameraPunch(1.05);
+    this.cameraPunch(self ? 0.95 : 0.32, self ? 0.85 : 0.2);
     this.wake();
   }
 
@@ -1565,8 +1647,10 @@ export class TableScene {
     this.wake();
   }
 
-  /** カメラのドリーパンチ（減衰）。reduced-motion 時はシェイクを伴わない（quality.cameraShake）。 */
-  cameraPunch(intensity: number): void {
+  /** カメラのドリーパンチ（減衰）。reduced-motion 時はシェイクを伴わない（quality.cameraShake）。
+   * shakeScale で横揺れ成分だけを個別に弱められる（他家起因の演出を控えめにする・契約19項目2）。 */
+  cameraPunch(intensity: number, shakeScale = 1): void {
+    if (intensity >= this.camKick) this.camShakeScale = shakeScale; // 最大パンチの倍率を採用
     this.camKick = Math.max(this.camKick, intensity);
     this.wake();
   }
@@ -1899,23 +1983,28 @@ export class TableScene {
   // ---- 描画ループ ---------------------------------------------------------
 
   private loop = (): void => {
-    const dt = Math.min(this.clock.getDelta(), 0.05);
+    const rawDt = this.clock.getDelta();
+    // シネマ（タイトルデモ）は約32fpsへ間引く（契約19項目3: 発熱/負荷対策。背景なので体感差ほぼ無し）。
+    // clock.getDelta() は毎フレーム1回だけ呼ぶ（複数回呼ぶと2回目以降が~0になる）ため、間引き分は
+    // アキュムレータに溜めて描画フレームでまとめて dt に使う＝イージングは滑らかなまま。
+    if (this.cinematic) {
+      this.cineFrameAccum += rawDt;
+      if (this.cineFrameAccum < CINE_FRAME_MIN) {
+        this.raf = requestAnimationFrame(this.loop);
+        return;
+      }
+    }
+    const dt = Math.min(this.cinematic ? this.cineFrameAccum : rawDt, 0.05);
+    if (this.cinematic) this.cineFrameAccum = 0;
     const k = 1 - Math.exp(-EASE_SPEED * dt);
     const now = performance.now();
     let motion = 0; // 残り移動量の指標（settle 判定用）
     let busy = false; // 退場アニメ等で継続が必要か
     let fxBusy = false; // 粒子/光輪/カメラパンチ等の演出が継続中か
 
-    // タイトル背景のデモ対局: ゆっくりした演出的カメラワーク（緩い旋回 + 時折の寄り引き・U4）。
-    // camPosGoal を毎フレーム更新し、既存のイージング追従で滑らかな眺めにする。idle させない。
+    // タイトル背景のデモ対局: 複数カットを黒フェードで切り替えるシネマ演出（契約19項目5）。idle させない。
     if (this.cinematic) {
-      this.cineT += dt;
-      const yaw = this.cineT * 0.12;
-      const pitch = 0.6 + 0.16 * Math.sin(this.cineT * 0.17);
-      const radius = 8.3 + 2.0 * Math.sin(this.cineT * 0.09);
-      const cp = Math.cos(pitch);
-      this.camTargetGoal.set(0, 0.15, 0);
-      this.camPosGoal.set(radius * cp * Math.cos(yaw), radius * Math.sin(pitch), radius * cp * Math.sin(yaw));
+      this.stepCinematic(dt);
       fxBusy = true;
     }
 
@@ -1931,8 +2020,9 @@ export class TableScene {
       const toTarget = TMP_A.subVectors(this.camTarget, this.camPos).normalize();
       this.camera.position.addScaledVector(toTarget, this.camKick * 0.32);
       if (this.quality.cameraShake) {
-        this.camera.position.x += (Math.random() - 0.5) * this.camKick * 0.14;
-        this.camera.position.y += (Math.random() - 0.5) * this.camKick * 0.14;
+        const sh = this.camKick * 0.14 * this.camShakeScale;
+        this.camera.position.x += (Math.random() - 0.5) * sh;
+        this.camera.position.y += (Math.random() - 0.5) * sh;
       }
       this.camera.lookAt(this.camTarget);
       this.camKick *= Math.exp(-9 * dt);
@@ -2088,7 +2178,8 @@ export class TableScene {
   resize(): void {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, this.quality.maxDpr);
+    let dpr = Math.min(window.devicePixelRatio || 1, this.quality.maxDpr);
+    if (this.cinematic) dpr = Math.min(dpr, CINE_DPR_CAP); // 背景デモは低DPRで十分（契約19項目3）
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h);
     this.camera.aspect = this.aspect();
@@ -2152,6 +2243,8 @@ export class TableScene {
     cel.removeEventListener('webglcontextlost', this.onContextLost as EventListener);
     cel.removeEventListener('webglcontextrestored', this.onContextRestored as EventListener);
     this.hideLostNotice();
+    this.cineFadeEl?.remove(); // シネマ黒フェード幕（契約19項目5）
+    this.cineFadeEl = null;
     delete (cel as unknown as { __cameraState?: () => unknown }).__cameraState;
 
     // 演出資源（コンテキストロスト対策・E11）: 光輪 → パーティクル → コンポーザ → 環境マップ

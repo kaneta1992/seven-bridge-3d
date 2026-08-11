@@ -43,10 +43,12 @@ export class DemoTable {
   }
 
   private newGame(): LocalDriver {
-    // 4人・長いラウンド数（実質終わらない＝タイトルで回し続ける）。gameOver は restart で作り直す。
+    // 4人・最大ラウンド数（エンジン上限20）。gameOver は restart で新規対局を作り直すため実質無限に回る。
+    // 以前は 99 を渡していたが、エンジンの totalRounds 1..20 検証で DemoTable コンストラクタが例外を投げ、
+    // showLobby の try/catch に握り潰されてデモが起動しない（背景卓が空回り）不具合になっていた（契約19項目4）。
     return new LocalDriver({
       players: DEMO_NAMES.map((n, i) => ({ id: `demo${i}`, name: n })),
-      totalRounds: 99,
+      totalRounds: 20,
     });
   }
 

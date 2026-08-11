@@ -204,7 +204,7 @@ export class GameUI {
     this.teardownGame();
     this.teardownNet();
     clear(this.root);
-    // タイトル背景の3Dデモ対局（U4）: ロビーの後ろで卓のデモが自動進行し、演出的カメラで眺めのよい画に。
+    // タイトル背景の3Dデモ対局（U4）: ロビーの後ろで卓のデモが自動進行し、シネマカメラで眺めのよい画に。
     // メニュー操作中も回り続ける。UI層のボットが LocalDriver の公開APIのみでランダム合法手を打つ。
     const demoHost = el('div', { id: 'demo-scene' });
     this.root.append(demoHost);
@@ -213,15 +213,79 @@ export class GameUI {
     } catch {
       this.demo = null; // WebGL 不可等でもロビーは出す（背景なしにフォールバック）
     }
-    const lobby = el('div', { class: 'title-screen' });
-    this.root.append(lobby);
-    renderLobby(lobby, {
+
+    const screen = el('div', { class: 'title-screen' });
+    this.root.append(screen);
+
+    // 設定パネル（従来のロビーのタブUI）。既定はスライドアウト＝デモ鑑賞。タップで開閉する（項目6）。
+    // 既存機能（?room=直行・設定永続化・公開ルーム一覧）はそのまま renderLobby に委ねる。
+    const panel = el('div', { class: 'lobby-panel' });
+    screen.append(panel);
+    renderLobby(panel, {
       onHotseat: (r) => this.startHotseat(r),
       onSolo: (r) => this.startSolo(r),
       onCreateRoom: (cfg) => this.createRoom(cfg),
       onJoinRoom: (code, name) => this.joinRoom(code, name),
       watchPublicRooms: (cb) => this.watchPublicRooms(cb),
     });
+    const closeBtn = el('button', { class: 'panel-close', text: '×', title: 'デモ鑑賞に戻る' });
+    panel.append(closeBtn);
+
+    // タイトルヒーロー（プロシージャルなロゴタイポ + 「TAP TO START」明滅）。タップで設定パネルを開く。
+    const hero = this.buildTitleHero();
+    screen.append(hero);
+
+    const open = (): void => screen.classList.add('panel-open');
+    const close = (): void => screen.classList.remove('panel-open');
+    hero.addEventListener('click', open);
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      close(); // いつでも閉じてデモ鑑賞に戻れる（E2: 開閉中もデモ進行/カット切替は継続）
+    });
+  }
+
+  // タイトルのヒーロー（ロゴ + 明滅する開始プロンプト）。すべてシステムフォント/プロシージャル（外部アセット無し）。
+  private buildTitleHero(): HTMLElement {
+    const suits = el('div', { class: 'hero-suits' }, [
+      el('span', { class: 's', text: '♠' }),
+      el('span', { class: 'h', text: '♥' }),
+      el('span', { class: 'd', text: '♦' }),
+      el('span', { class: 'c', text: '♣' }),
+    ]);
+    const logo = el('div', { class: 'hero-logo' }, [
+      el('span', { class: 'main', text: 'セブンブリッジ' }),
+      el('span', { class: 'sub3d', text: '3D' }),
+    ]);
+    const plate = el('div', { class: 'hero-plate' }, [
+      suits,
+      logo,
+      el('div', { class: 'hero-rule' }),
+      el('div', { class: 'hero-tagline', text: '友だちとルームコードで卓を囲む通信対戦' }),
+    ]);
+    const start = el('div', { class: 'hero-start' }, [
+      el('span', { class: 'en', text: 'TAP TO START' }),
+      el('span', { class: 'ja', text: 'タップして開始' }),
+    ]);
+    return el('div', { class: 'title-hero' }, [plate, start]);
+  }
+
+  // 画面遷移のトランジション（項目7）: 黒幕を横ワイプで被せ→被覆中に build() で画面を差し替え→
+  // 反対側へ抜けて解除。遷移中は多重呼び出しを無視（E3: トランジション中の多重クリック防止）。
+  private transitioning = false;
+  private transition(build: () => void): void {
+    if (this.transitioning) return;
+    this.transitioning = true;
+    const ov = el('div', { class: 'screen-wipe' });
+    document.body.appendChild(ov);
+    requestAnimationFrame(() => ov.classList.add('cover'));
+    window.setTimeout(() => {
+      build();
+      requestAnimationFrame(() => ov.classList.add('reveal'));
+      window.setTimeout(() => {
+        ov.remove();
+        this.transitioning = false;
+      }, 460);
+    }, 400);
   }
 
   // 公開ルーム一覧の購読。初回呼び出しで閲覧用ロビーチャネルを遅延生成する（未閲覧なら接続しない）。
@@ -327,7 +391,7 @@ export class GameUI {
   private startHotseat(cfg: LobbyResult): void {
     this.teardownLobbyBrowser();
     const driver = new LocalDriver({ players: cfg.players, totalRounds: cfg.totalRounds });
-    this.beginWithDriver(driver);
+    this.transition(() => this.beginWithDriver(driver)); // タイトル→対局開始（項目7）
   }
 
   // ---- 1人プレイ（人間1+NPC・契約16） ------------------------------------
@@ -341,7 +405,7 @@ export class GameUI {
       selfId: cfg.selfId,
       npcIds: cfg.npcIds,
     });
-    this.beginWithDriver(driver);
+    this.transition(() => this.beginWithDriver(driver)); // タイトル→対局開始（項目7）
   }
 
   // ---- 通信対戦: ルーム作成（ホスト） -----------------------------------
@@ -420,7 +484,7 @@ export class GameUI {
       // 対局開始で公開広告を停止（TTL失効で一覧から消える・E10追補）。ロビー接続も閉じる。
       this.advertiser?.dispose();
       this.advertiser = null;
-      this.beginWithDriver(driver);
+      this.transition(() => this.beginWithDriver(driver)); // 待機室→対局開始（項目7）
     });
     session.on('error', (message) => this.showNotice('接続できませんでした', message));
     session.on('fatal', (message) => this.showNotice('ゲーム終了', message));
@@ -1456,7 +1520,7 @@ export class GameUI {
     });
     modal.append(el('div', { style: 'margin-top:14px' }, [buildScoreTable(view, view.finalWinners)]));
     const again = el('button', { class: 'primary', text: 'ロビーに戻る' });
-    again.onclick = () => this.showLobby();
+    again.onclick = () => this.transition(() => this.showLobby()); // リザルト→タイトル（項目7）
     modal.append(el('div', { class: 'row' }, [again]));
     return el('div', { class: 'center' }, [modal]);
   }

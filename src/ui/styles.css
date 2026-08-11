@@ -1330,6 +1330,163 @@ table.score td.win {
   color: var(--ink-2);
 }
 
+/* ==========================================================================
+   タイトルヒーロー（契約19項目6）: 背景のデモ卓の上に、プロシージャルなロゴタイポと明滅する
+   開始プロンプトを重ねる。タップで設定パネル（.lobby-panel）がスライドインし、閉じるとデモ鑑賞へ戻る。
+   ========================================================================== */
+.title-hero {
+  position: absolute;
+  inset: 0;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6vh;
+  cursor: pointer;
+  padding: 24px;
+  background: radial-gradient(120% 90% at 50% 44%, rgba(6, 8, 7, 0.12), rgba(4, 6, 5, 0.66) 100%);
+  transition: opacity 0.45s ease;
+}
+.title-screen.panel-open .title-hero {
+  opacity: 0;
+  pointer-events: none;
+}
+.hero-plate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 34px 42px;
+  text-align: center;
+}
+.hero-suits {
+  display: flex;
+  gap: 16px;
+  font-size: clamp(16px, 2.4vw, 24px);
+  letter-spacing: 0.1em;
+}
+.hero-suits .s { color: #e9e4d6; }
+.hero-suits .h { color: #e2795f; }
+.hero-suits .d { color: #6fa9d8; }
+.hero-suits .c { color: #6fbf8e; }
+.hero-logo {
+  display: flex;
+  align-items: baseline;
+  gap: 0.28em;
+  color: #efe9db;
+}
+.hero-logo .main {
+  font-size: clamp(34px, 7.6vw, 82px);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-shadow: 0 2px 30px rgba(0, 0, 0, 0.6), 0 0 1px rgba(255, 255, 255, 0.4);
+}
+.hero-logo .sub3d {
+  font-size: clamp(18px, 3.4vw, 34px);
+  font-weight: 600;
+  letter-spacing: 0.34em;
+  color: #d9b25a;
+  padding: 2px 10px;
+  border: 1px solid rgba(217, 178, 90, 0.6);
+  border-radius: 2px;
+}
+.hero-rule {
+  width: min(52vw, 420px);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(233, 228, 214, 0.6), transparent);
+}
+.hero-tagline {
+  color: rgba(233, 228, 214, 0.78);
+  font-size: clamp(12px, 1.8vw, 16px);
+  letter-spacing: 0.14em;
+}
+.hero-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  animation: hero-blink 1.6s ease-in-out infinite;
+}
+.hero-start .en {
+  color: #efe9db;
+  font-size: clamp(15px, 2.2vw, 22px);
+  font-weight: 700;
+  letter-spacing: 0.34em;
+}
+.hero-start .ja {
+  color: rgba(217, 178, 90, 0.92);
+  font-size: clamp(11px, 1.5vw, 14px);
+  letter-spacing: 0.24em;
+}
+@keyframes hero-blink {
+  0%, 100% { opacity: 0.28; }
+  50% { opacity: 1; }
+}
+/* 設定パネル（スライドイン）。既定は退避＝デモ全面。open で滑り込み操作可能に。 */
+.lobby-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 22;
+  opacity: 0;
+  transform: translateY(3%) scale(0.985);
+  pointer-events: none;
+  transition: opacity 0.42s ease, transform 0.42s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.title-screen.panel-open .lobby-panel {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.panel-close {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  right: 14px;
+  z-index: 24;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--paper);
+  background: rgba(20, 18, 14, 0.5);
+  border: 1px solid rgba(233, 228, 214, 0.4);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.panel-close:hover { background: rgba(20, 18, 14, 0.72); }
+
+/* ==========================================================================
+   画面遷移トランジション（契約19項目7）: 黒幕を左→右へ流して被覆/解除する横ワイプ。
+   ぱっと切替を廃し、被覆中に DOM を差し替える。先端に細い金罫（NieR 風の走査線）。
+   ========================================================================== */
+.screen-wipe {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background: #070806;
+  transform: translateX(-100%);
+  transition: transform 0.4s cubic-bezier(0.7, 0, 0.3, 1);
+}
+.screen-wipe::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 2px;
+  height: 100%;
+  background: rgba(217, 178, 90, 0.8);
+  box-shadow: 0 0 18px rgba(217, 178, 90, 0.6);
+}
+.screen-wipe.cover {
+  transform: translateX(0);
+}
+.screen-wipe.reveal {
+  transform: translateX(100%);
+  transition: transform 0.44s cubic-bezier(0.7, 0, 0.3, 1);
+}
+
 /* アクセシビリティ: 動きの抑制設定を尊重（派手なアニメを穏やかに）。E6 */
 @media (prefers-reduced-motion: reduce) {
   .callout {
@@ -1345,5 +1502,16 @@ table.score td.win {
   }
   button:hover:not(:disabled) {
     transform: none;
+  }
+  .hero-start {
+    animation: none;
+    opacity: 0.92;
+  }
+  .lobby-panel {
+    transition-duration: 0.16s;
+  }
+  .screen-wipe,
+  .screen-wipe.reveal {
+    transition-duration: 0.16s;
   }
 }
