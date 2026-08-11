@@ -208,6 +208,9 @@ export class TableScene {
   private meldBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number }>();
   // Meshy生成のぬいぐるみGLB（読み込めた場合のみ・dispose対象。契約24）
   private plushGlbs: THREE.Object3D[] = [];
+  // 契約25(R27): Meshy 家具ロード成功時に除去するプロシージャル家具メッシュ / 統合家具GLB
+  private swapFurniture: THREE.Mesh[] = [];
+  private roomGlb: THREE.Object3D | null = null;
   // ぬいぐるみ「見つめると反応する」リアクション（契約24）。注視+ズーム検知→両体の transform 演出。
   private plushReactions: PlushReactions | null = null;
   // リアクションの効果音トリガ（app.ts が AudioKit へ接続する・src/render は音を持たない）。
@@ -508,6 +511,12 @@ export class TableScene {
     // 全家具は cast/receive=false・既定レイヤ(0)のまま＝選択的 Bloom（レイヤ1抽出）に一切載らない。
     const opaque: THREE.BufferGeometry[] = []; // MeshStandardMaterial(vertexColors) 行き
     const glow: THREE.BufferGeometry[] = []; // MeshBasicMaterial(vertexColors) 行き＝発光面
+    // 契約25(R27): Meshy 家具 GLB（room-furniture.glb）が読み込めたら差し替えるプリミティブは
+    // swap バケットへ分けて焼き、ロード成功時にシーンから除去する。失敗時はそのまま残る
+    // （プロシージャル版フォールバック・ぬいぐるみ GLB と同方式）。
+    const swapOpaque: THREE.BufferGeometry[] = [];
+    const swapGlow: THREE.BufferGeometry[] = [];
+    let swap = false; // true の間に bake されたものは swap バケット行き
     const unitBox = new THREE.BoxGeometry(1, 1, 1);
     const unitCyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 14);
     const unitPlane = new THREE.PlaneGeometry(1, 1);
@@ -536,7 +545,8 @@ export class TableScene {
         ca[i * 3 + 2] = tmpCol.b;
       }
       geom.setAttribute('color', new THREE.Float32BufferAttribute(ca, 3));
-      bucket.push(geom);
+      // swap モード中は呼び出し側の指定（opaque/glow）を対応する swap バケットへ振り替える（契約25）。
+      (swap ? (bucket === glow ? swapGlow : swapOpaque) : bucket).push(geom);
     };
     const boxP = (color: string, w: number, h: number, d: number, x: number, y: number, z: number, ry = 0): void =>
       bake(opaque, unitBox.clone(), color, w, h, d, x, y, z, 0, ry, 0);
@@ -567,6 +577,7 @@ export class TableScene {
         boxP('#742f2c', 0.16, winH + 0.8, 0.05, -3 + sx * (winW / 2 + 0.1 + f * 0.22), winY, winZ + 0.2);
     }
 
+    swap = true; // ---- ここから Meshy 家具（本棚/ソファ/サイドテーブル/植物）で差し替わる区間（契約25） ----
     // 本棚（+x 壁ぎわ）: 枠 + 棚板を増やし（6段）背表紙をぎっしり（各段12冊）。上に小物も置く。
     const shelfX = wallZ - 0.5;
     const shelfY = floorY + 2.2;
@@ -622,6 +633,7 @@ export class TableScene {
     plant(-wallZ + 1.2, wallZ - 1.2);
     plant(-wallZ + 1.2, -wallZ + 3.0);
 
+    swap = false; // ---- 額/天井照明/梁は維持（契約25 keep） ----
     // 壁の額（+z 壁に 5 枚のギャラリー）: 額縁 + 単色の抽象画パネル。高さ違いで賑やかに。
     const artColors = ['#3f6ea5', '#8a6f3a', '#5b7a4a', '#a84a6f', '#4a6f86'];
     for (let i = 0; i < 5; i++) {
@@ -644,6 +656,7 @@ export class TableScene {
     for (const bx of [-5, 5]) boxP(woodDark, 0.3, 0.3, wallZ * 2 - 1.2, bx, ceilY - 0.12, 0);
     for (const bz of [-5, 5]) boxP(woodDark, wallZ * 2 - 1.2, 0.26, 0.26, 0, ceilY - 0.1, bz);
 
+    swap = true; // ---- Meshy サイドボードで差し替わる区間（天板小物ごと・契約25） ----
     // サイドボード + 小物（+z 壁・額の下）: キャビネット + 引き出し + 花瓶/積み本/食器/置時計/燭台（項目6）。
     const sbY = floorY + 0.55;
     const sbZ = wallZ - 0.42;
@@ -668,6 +681,7 @@ export class TableScene {
       bake(glow, new THREE.ConeGeometry(0.05, 0.14, 8), '#ffcf7a', 1, 1, 1, cx, sbY + 1.12, sbZ);
     }
 
+    swap = false; // ---- 壁掛け時計は維持（契約25 keep） ----
     // 壁掛け時計（-x 壁・ソファ上）: 丸い文字盤 + 針。首振りで側方を見たときのアクセント（項目6）。
     const clockX = -wallZ + 0.12;
     const clockY = floorY + 4.2;
@@ -676,6 +690,7 @@ export class TableScene {
     boxP('#1b1610', 0.03, 0.34, 0.04, clockX + 0.06, clockY + 0.08, 1.0); // 長針
     boxP('#1b1610', 0.03, 0.04, 0.24, clockX + 0.06, clockY, 1.0); // 短針
 
+    swap = true; // ---- Meshy カゴ/プフ/フロアランプで差し替わる区間（契約25） ----
     // 床の小物（生活感の密度・項目4）: 積み雑誌 + 収納カゴ + 丸いプフ（オットマン）。
     boxP('#4d7a4a', 0.9, 0.12, 0.7, -2.5, floorY + 0.06, -2.5); // 雑誌の山
     boxP('#c9a23a', 0.85, 0.1, 0.66, -2.55, floorY + 0.18, -2.45, 0.15);
@@ -688,11 +703,12 @@ export class TableScene {
     cylP('#20242b', 0.28, 0.1, flX, floorY + 0.05, flZ); // 台座
     cylP('#20242b', 0.05, 2.4, flX, floorY + 1.2, flZ); // 支柱
     bake(glow, new THREE.CylinderGeometry(0.34, 0.42, 0.6, 20, 1, true), '#ffe6b0', 1, 1, 1, flX, floorY + 2.5, flZ); // シェード
+    swap = false;
 
     // ---- 2バケットを統合し、シーンへ最少メッシュで追加（契約20項目4の中核） ----
     const opaqueMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
     const glowMat = new THREE.MeshBasicMaterial({ vertexColors: true });
-    const flush = (bucket: THREE.BufferGeometry[], material: THREE.Material): void => {
+    const flush = (bucket: THREE.BufferGeometry[], material: THREE.Material, collect?: THREE.Mesh[]): void => {
       if (!bucket.length) return;
       if (MERGE_FURNITURE) {
         const merged = mergeGeometries(bucket, false); // useGroups=false ＝ 1グループ＝1描画コール
@@ -701,6 +717,7 @@ export class TableScene {
         mesh.castShadow = false;
         mesh.receiveShadow = false;
         this.scene.add(mesh);
+        collect?.push(mesh);
       } else {
         // 計測用（統合前）: 各プリミティブを個別メッシュで置く＝統合前の描画コール数になる。
         for (const g of bucket) {
@@ -708,11 +725,16 @@ export class TableScene {
           mesh.castShadow = false;
           mesh.receiveShadow = false;
           this.scene.add(mesh);
+          collect?.push(mesh);
         }
       }
     };
     flush(opaque, opaqueMat);
     flush(glow, glowMat);
+    // swap バケットは keep とマテリアルを共有しない（除去時に dispose するため・契約25）。
+    flush(swapOpaque, opaqueMat.clone(), this.swapFurniture);
+    flush(swapGlow, glowMat.clone(), this.swapFurniture);
+    this.loadRoomFurniture();
     unitBox.dispose?.();
     unitCyl.dispose?.();
     unitPlane.dispose?.();
@@ -745,6 +767,43 @@ export class TableScene {
     this.scene.add(plush.group);
     // Meshy 生成の高品質 GLB があれば差し替える（無ければプロシージャル版のまま・契約24）。
     this.loadPlushGlbs(plush.group, floorY + 0.7, -wallZ + 1.0, 2.0);
+  }
+
+  /**
+   * 契約25(R27): Meshy 家具の統合 GLB（1メッシュ・1マテリアル・1アトラス＝+1描画コール）を
+   * 非同期ロードし、成功時のみプロシージャル家具の swap バケットを除去・解放する。
+   * 404/失敗時は何もしない（プロシージャル版フォールバック）。頂点はワールド座標へ焼き込み済み
+   * なので原点に置くだけでよい。影・Bloom は家具の既定方針どおり不参加（cast/receive=false・レイヤ0）。
+   */
+  private loadRoomFurniture(): void {
+    const loader = new GLTFLoader();
+    const base = (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? './';
+    loader.load(
+      `${base}models/room-furniture.glb`,
+      (gltf) => {
+        const root = gltf.scene;
+        root.traverse((o: THREE.Object3D) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh) {
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
+          }
+        });
+        this.scene.add(root);
+        this.roomGlb = root;
+        for (const mesh of this.swapFurniture) {
+          this.scene.remove(mesh);
+          mesh.geometry?.dispose?.();
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const m of mats) m.dispose?.();
+        }
+        this.swapFurniture = [];
+      },
+      undefined,
+      () => {
+        /* フォールバック: プロシージャル家具のまま */
+      },
+    );
   }
 
   /**
@@ -2172,6 +2231,24 @@ export class TableScene {
         labels,
       };
     };
+    // 検証用（契約25）: 部屋の任意方位をカメラで見る。卓中央からyawDeg方向の壁面を注視して即スナップ。
+    // 家具GLBの向き・接地・スケールの視覚検証に使う（cinematic中はstepCinematicが上書きするためゲーム内で使う）。
+    (el as unknown as { __lookProbe?: (yawDeg: number, h?: number, fov?: number) => void }).__lookProbe = (
+      yawDeg, h = 1.2, fov,
+    ) => {
+      const a = (yawDeg * Math.PI) / 180;
+      this.camPosGoal.set(-Math.sin(a) * 1.5, 1.6, -Math.cos(a) * 1.5);
+      this.camTargetGoal.set(Math.sin(a) * 8, h, Math.cos(a) * 8);
+      this.camPos.copy(this.camPosGoal);
+      this.camTarget.copy(this.camTargetGoal);
+      this.camera.position.copy(this.camPos);
+      this.camera.lookAt(this.camTarget);
+      if (fov) {
+        this.camera.fov = fov;
+        this.camera.updateProjectionMatrix();
+      }
+      this.wake();
+    };
     // 検証用: 卓面ワールド点(x,0,z)を現カメラで画面座標へ投影し、その座標で dropTargetAt を
     // 逆引きする。オービット後もレイキャストがカメラへ追従する（E3）ことの確認に使う。
     (el as unknown as { __dropProbe?: (x: number, z: number) => unknown }).__dropProbe = (x, z) => {
@@ -2678,6 +2755,31 @@ export class TableScene {
       this.scene.remove(obj);
     }
     this.plushGlbs = [];
+    // 統合家具 GLB（契約25）: ジオメトリ・マテリアル・アトラステクスチャを明示解放
+    if (this.roomGlb) {
+      this.roomGlb.traverse((o: THREE.Object3D) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) {
+          mesh.geometry?.dispose?.();
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const m of mats) {
+            const sm = m as THREE.MeshStandardMaterial;
+            sm.map?.dispose?.();
+            sm.dispose?.();
+          }
+        }
+      });
+      this.scene.remove(this.roomGlb);
+      this.roomGlb = null;
+    }
+    // GLB 未ロードのまま破棄される場合に備え、swap 家具（クローンマテリアル）も明示解放（契約25）
+    for (const mesh of this.swapFurniture) {
+      mesh.geometry?.dispose?.();
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) m.dispose?.();
+      this.scene.remove(mesh);
+    }
+    this.swapFurniture = [];
 
     this.known.clear();
     this.backById.clear();
