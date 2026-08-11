@@ -41,6 +41,10 @@ const ITEMS = [
   { name: 'chandelier', poly: 6000, prompt: 'rustic round wooden chandelier with warm candle style lights and a hanging chain' },
   { name: 'hangplant', poly: 6000, prompt: 'hanging plant with trailing ivy leaves in a macrame rope planter' },
   { name: 'suitcases', poly: 5000, prompt: 'stack of three vintage leather suitcases, warm brown tones' },
+  // ---- 第3弾（R31・契約29: 壁の情報量）----
+  { name: 'painting', poly: 3000, prompt: 'framed landscape oil painting, warm sunset over golden fields, thin ornate wooden frame, wall art' },
+  { name: 'macrame', poly: 4000, prompt: 'macrame wall hanging, woven cotton rope tapestry with tassels on a wooden dowel, boho style' },
+  { name: 'wallclock', poly: 3000, prompt: 'vintage round wall clock, warm wooden frame, cream face with roman numerals' },
 ];
 
 mkdirSync(OUT, { recursive: true });

@@ -39,6 +39,10 @@ export const MODELS = {
   chandelier: { size: { w: 1.7, h: 1.5, d: 1.7 }, fixYaw: 0 },
   hangplant: { size: { w: 0.9, h: 1.6, d: 0.9 }, fixYaw: 0 },
   suitcases: { size: { w: 1.2, h: 1.2, d: 0.85 }, fixYaw: 0 },
+  // ---- 第3弾（R31・契約29: 壁の情報量） ----
+  painting: { size: { w: 1.6, h: 1.2, d: 0.12 }, fixYaw: 0, stretch: true },
+  macrame: { size: { w: 1.1, h: 1.5, d: 0.15 }, fixYaw: 0, stretch: true },
+  wallclock: { size: { w: 0.8, h: 0.8, d: 0.18 }, fixYaw: 0, stretch: true },
 };
 
 // 配置インスタンス: 同じモデルを複数置ける（ジオメトリ複製・テクスチャ共有＝Meshy費用ゼロ）。
@@ -94,6 +98,14 @@ export const INSTANCES = [
   { model: 'laddershelf', x: -4.65, z: 8.3, yaw: 172 },
   { model: 'plant', x: -6.35, z: 8.05, yaw: 300, scale: 0.9 },
   { model: 'plant', x: -8.0, z: 7.9, yaw: 40 },
+  // ---- 壁掛け（R31・契約29: 額絵/マクラメ/時計 + ウォールシェルフ複製） ----
+  { model: 'painting', x: -8.85, z: 5.4, yaw: 90, yOff: 2.4 }, // -x壁・おもちゃ箱の上
+  { model: 'painting', x: -6.9, z: -8.87, yaw: 0, yOff: 2.75, scale: 0.85 }, // 暖炉の上
+  { model: 'painting', x: 2.6, z: -8.88, yaw: 0, yOff: 2.6, scale: 0.9 }, // TVの上
+  { model: 'macrame', x: 5.6, z: 8.87, yaw: 180, yOff: 2.3 }, // +z壁・2人掛けの上
+  { model: 'wallclock', x: 8.87, z: 0.6, yaw: -90, yOff: 2.9 }, // +x壁・コンソールの上
+  { model: 'wallshelf', x: -8.75, z: -4.9, yaw: 90, yOff: 2.7 }, // 複製・-x壁
+  { model: 'wallshelf', x: 8.8, z: -5.9, yaw: -90, yOff: 2.7, scale: 0.9 }, // 複製・+x壁
   // ---- 天井（梁吊り: 梁は x=±5 と z=±5 に走る・下面≈5.78） ----
   { model: 'chandelier', x: 0, z: -5.0, yaw: 0, topY: 5.78 },
   { model: 'hangplant', x: -5.0, z: 3.5, yaw: 30, topY: 5.78 },

@@ -495,13 +495,21 @@ export class TableScene {
     // BoxGeometry の面順: +x, -x, +y(天井), -y(床), +z, -z。面ごとに材質を割り当てる。
     // 契約27(R29): 躯体を単色→プロシージャルテクスチャへ（木目フローリング・壁紙+腰壁・板張り天井）。
     // 従来と同じ暖色パレットで描いているため照明・フォグ・カード視認性は据え置き。
-    const floorTex = makeFloorWood();
+    const floorTexs = makeFloorWood(); // カラー+法線+粗さの3点セット（契約29: のっぺり解消）
     const wallTex = makeWallPaper();
     const ceilTex = makeCeilingWood();
-    this.roomTextures.push(floorTex, wallTex, ceilTex);
+    this.roomTextures.push(floorTexs.map, floorTexs.normalMap, floorTexs.roughnessMap, wallTex, ceilTex);
     const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, roughness: 0.96, metalness: 0, side: THREE.BackSide });
     const ceilMat = new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 0.97, metalness: 0, side: THREE.BackSide });
-    const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.93, metalness: 0, side: THREE.BackSide });
+    const floorMat = new THREE.MeshStandardMaterial({
+      map: floorTexs.map,
+      normalMap: floorTexs.normalMap,
+      roughnessMap: floorTexs.roughnessMap,
+      roughness: 1, // roughnessMap の値をそのまま使う（乗算係数）
+      metalness: 0,
+      side: THREE.BackSide,
+    });
+    floorMat.normalScale?.set?.(0.9, 0.9);
     const mats = [wallMat, wallMat, ceilMat, floorMat, wallMat, wallMat];
     const room = new THREE.Mesh(new THREE.BoxGeometry(S, H, S), mats);
     room.position.set(0, floorY + H / 2, 0);
@@ -822,6 +830,12 @@ export class TableScene {
           for (const m of mats) m.dispose?.();
         }
         this.swapFurniture = [];
+        // 家具の実サーフェスが確定したので、隠れぬいぐるみを接地スナップ込みで置き直す（契約29）。
+        const seed = this.hideSeed;
+        if (seed) {
+          this.hideSeed = null;
+          this.setHideSeed(seed);
+        }
       },
       undefined,
       () => {
@@ -860,6 +874,7 @@ export class TableScene {
       [second, 'dalmatian'],
     ];
     const bb = new THREE.Box3();
+    const ray = new THREE.Raycaster();
     for (const [p, kind] of picks) {
       const clone = (kind === 'panda' ? panda : dal).clone(true);
       clone.rotation.set(0, p.yaw, 0);
@@ -868,6 +883,16 @@ export class TableScene {
       clone.updateMatrixWorld(true);
       bb.setFromObject(clone);
       clone.position.y += p.y - bb.min.y; // バウンディング底面を候補地の接地面へ
+      // 接地スナップ（契約29）: 家具GLBの実サーフェス（棚段・天面・座面・額のふち）へ吸着し、
+      // カタログの目測高さの誤差（浮き/めり込み）を実測で吸収する。スポット選択はシード同期のまま
+      // ＝吸着は各端末の見た目補正のみで同期に影響しない。GLB未ロード時はカタログ値のまま。
+      if (this.roomGlb) {
+        ray.set(new THREE.Vector3(p.x, p.y + 0.6, p.z), new THREE.Vector3(0, -1, 0));
+        const hit = ray
+          .intersectObject(this.roomGlb, true)
+          .find((h: { point: { y: number } }) => h.point.y > p.y - 0.35 && h.point.y < p.y + 0.55);
+        if (hit) clone.position.y += hit.point.y - p.y;
+      }
       clone.updateMatrixWorld(true);
       this.scene.add(clone);
       this.hiddenPlush.push(clone);

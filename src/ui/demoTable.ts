@@ -22,6 +22,9 @@ export class DemoTable {
   constructor(host: HTMLElement) {
     this.scene = new TableScene(host);
     this.scene.setCinematic(true); // ゆっくりした演出的カメラワーク（緩い旋回・時折の寄り引き）
+    // タイトルデモにも隠れぬいぐるみを出す（契約29）: 同期不要なので毎回ランダム。
+    // シネマカメラが部屋を舐めるとき「あ、いた」を作る。リアクションは cinematic 中は発火しない（契約24）。
+    this.scene.setHideSeed(`demo-${Math.random().toString(36).slice(2, 10)}`);
     this.driver = this.newGame();
     this.unsub = this.driver.subscribe(() => this.render());
     void this.driver.dispatch({ type: 'startRound' });
@@ -58,6 +61,7 @@ export class DemoTable {
     const view = this.driver.getView(this.driver.currentPlayerId());
     if (view.round !== this.lastRound && view.round > 0) {
       this.scene.clearCards(); // ラウンド遷移の掃引→配札演出（Q1 の掃引も背景で見える）
+      this.scene.setHideSeed(`demo-${Math.random().toString(36).slice(2, 10)}`); // ラウンド毎に隠れ直す（契約29）
       this.lastRound = view.round;
       this.meldIds = new Set(view.melds.map((m) => m.id));
     }
