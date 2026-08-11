@@ -892,9 +892,14 @@ export class GameUI {
       }
       this.dragging = false;
       this.focusedId = null;
-      this.scene?.hideDropTargets();
       this.clearMeldHighlight();
-      if (this.resolveDrop(id, e.clientX, e.clientY)) return; // 成功 dispatch → subscribe で render
+      // 重要: hideDropTargets は resolveDrop の後に呼ぶ（2026-08-11 修正）。
+      // hideDropTargets は attachableMelds を消すため、先に呼ぶと dropTargetAt のメルド判定
+      // （メッシュゲート・ゾーンフォールバックとも）が全て素通りし「場=公開」へ化けて
+      // 「有効なメルドではありません」になる（ユーザー報告の付け札不能の真因）。
+      const resolved = this.resolveDrop(id, e.clientX, e.clientY);
+      this.scene?.hideDropTargets();
+      if (resolved) return; // 成功 dispatch → subscribe で render
       this.commitOrder();
       this.render();
     };
@@ -1089,7 +1094,8 @@ export class GameUI {
     const inBand = y >= handTop - 6;
     // 手札帯内でも、ポインタ直下が扇のカードでなければ並び替えではない（項目1b）。自席メルドが手札帯へ
     // 食い込む配置（項目1a）でも、メルド上へ落とせば付け札を成立させる。扇カード上のみ並び替え扱い。
-    if (inBand && this.pointerOverHandCard(x, y, id)) return false; // 手札帯・扇の上 = 並び替え
+    const overHand = inBand && this.pointerOverHandCard(x, y, id);
+    if (overHand) return false; // 手札帯・扇の上 = 並び替え
     // 1) 2D メルドチップ（パネル展開時の付け札導線）
     const dom = this.domMeldAt(card, x, y);
     if (dom) {
