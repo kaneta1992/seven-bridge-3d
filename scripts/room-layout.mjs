@@ -44,6 +44,13 @@ export const MODELS = {
   macrame: { size: { w: 1.1, h: 1.5, d: 0.15 }, fixYaw: 0, stretch: true },
   wallclock: { size: { w: 0.8, h: 0.8, d: 0.18 }, fixYaw: 0, stretch: true },
   // ---- 第4弾（R32・契約30: 天面の小物）----
+  // ---- 第5弾（R34・契約31: 囮ぬいぐるみ+カモフラ小物＝難度8）----
+  pengplush: { size: { w: 0.4, h: 0.45, d: 0.4 }, fixYaw: 0 },
+  bunnyplush: { size: { w: 0.45, h: 0.5, d: 0.45 }, fixYaw: 0 },
+  teddybear: { size: { w: 0.5, h: 0.5, d: 0.5 }, fixYaw: 0 },
+  catplush: { size: { w: 0.45, h: 0.42, d: 0.45 }, fixYaw: 0 },
+  blanketpile: { size: { w: 0.7, h: 0.5, d: 0.55 }, fixYaw: 0 },
+  pillowpair: { size: { w: 0.7, h: 0.5, d: 0.35 }, fixYaw: 0 },
   bookstack: { size: { w: 0.45, h: 0.32, d: 0.32 }, fixYaw: 0 },
   vaseset: { size: { w: 0.35, h: 0.6, d: 0.35 }, fixYaw: 0 },
   teaset: { size: { w: 0.5, h: 0.28, d: 0.4 }, fixYaw: 0 },
@@ -139,4 +146,18 @@ export const INSTANCES = [
   { model: 'vaseset', x: 4.0, z: -8.25, yaw: 20, snapCap: 1.0, scale: 0.85 }, // TV台（右端手前）
   { model: 'photoframes', x: 8.55, z: -0.25, yaw: -95, snapCap: 1.0, scale: 0.9 }, // レコードコンソール左
   { model: 'miniplant', x: -1.35, z: 8.6, yaw: 150, snapCap: 1.1 }, // サイドボード（花瓶の奥）
+  // ---- 囮ぬいぐるみ（R34・契約31: 本物2体と紛らわしい偽陽性。かくれんぼスポットから0.35m以上離す）----
+  { model: 'teddybear', x: 7.0, z: -5.85, yaw: -160, snapCap: 0.9 }, // アームチェア座面の隅
+  { model: 'teddybear', x: -6.95, z: 4.15, yaw: 60, scale: 0.9 }, // おもちゃ箱の前の床
+  { model: 'bunnyplush', x: -0.45, z: 8.5, yaw: 185, snapCap: 1.1 }, // サイドボードの上（小物の間）
+  { model: 'bunnyplush', x: -7.8, z: -1.25, yaw: -30, snapCap: 0.05, scale: 0.9 }, // 犬用ベッドの中
+  { model: 'pengplush', x: 4.85, z: -6.4, yaw: 170 }, // 地球儀の脇の床（白黒＝ダルメ空似）
+  { model: 'pengplush', x: -8.55, z: 0.35, yaw: 95, snapCap: 1.35, scale: 0.9 }, // ソファ背もたれの上
+  { model: 'catplush', x: 5.65, z: 4.95, yaw: -120 }, // クッションと2人掛けの間の床
+  { model: 'catplush', x: -2.0, z: -7.75, yaw: 15, snapCap: 0.3, scale: 0.9 }, // 窓下クッションの上
+  // ---- カモフラ小物（カラフルな布物＝2体の派手なマントと同化させる）----
+  { model: 'blanketpile', x: 5.7, z: 7.9, yaw: -140, snapCap: 0.75 }, // 2人掛けの座面（端）
+  { model: 'blanketpile', x: 8.45, z: -7.05, yaw: -75, scale: 0.9 }, // ランプとトランクの間の床
+  { model: 'pillowpair', x: -4.6, z: -7.3, yaw: 25 }, // 薪カゴの脇の床
+  { model: 'pillowpair', x: 7.9, z: -7.1, yaw: -50, scale: 0.9 }, // ランプとアームチェアの間
 ];

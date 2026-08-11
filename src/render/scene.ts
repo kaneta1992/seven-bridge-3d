@@ -509,9 +509,10 @@ export class TableScene {
       roughnessMap: floorTexs.roughnessMap,
       roughness: 1, // roughnessMap の値をそのまま使う（乗算係数）
       metalness: 0,
+      envMapIntensity: 1.3, // 契約31: 磨いた床の環境映り込みで艶と情報量を出す
       side: THREE.BackSide,
     });
-    floorMat.normalScale?.set?.(0.9, 0.9);
+    floorMat.normalScale?.set?.(1.3, 1.3);
     const mats = [wallMat, wallMat, ceilMat, floorMat, wallMat, wallMat];
     const room = new THREE.Mesh(new THREE.BoxGeometry(S, H, S), mats);
     room.position.set(0, floorY + H / 2, 0);
@@ -779,9 +780,10 @@ export class TableScene {
     ceilingLight.position.set(0, ceilY - 0.5, 0);
     this.scene.add(ceilingLight);
     if (this.quality.name !== 'low') {
-      const windowLight = new THREE.DirectionalLight(0xffcf94, 0.32);
+      // 契約31: 床の法線マップが陰影を得られるよう窓光を強化し、床を斜めに横切る角度にする
+      const windowLight = new THREE.DirectionalLight(0xffcf94, 0.6);
       windowLight.position.set(-3, winY, -6);
-      windowLight.target.position.set(0, 0, 0);
+      windowLight.target.position.set(2.5, -0.5, 4);
       this.scene.add(windowLight);
       this.scene.add(windowLight.target);
       const lamp = new THREE.PointLight(0xffb066, 10, 12, 2);
@@ -875,8 +877,8 @@ export class TableScene {
       [first, 'panda'],
       [second, 'dalmatian'],
     ];
-    // 難化ジッター（2026-08-12 ユーザー要望「もっと難しく」）: 同じシードから決定的に導出する
-    // 向き±30°とスケール0.8〜1.0の揺らぎ。全クライアント同一（同期安全）でシルエットを読みにくくする。
+    // 難化ジッター（2026-08-12 ユーザー要望・難度8へ強化）: 同じシードから決定的に導出する
+    // 向き±30°とスケール0.75〜0.95の揺らぎ（縮小方向）。全クライアント同一（同期安全）。
     let rs = hashSeed(`${this.hideSeed}#jitter`);
     const rnd = (): number => {
       const step = nextRng(rs);
@@ -887,7 +889,7 @@ export class TableScene {
       const jittered: HideSpot = {
         ...p,
         yaw: p.yaw + (rnd() - 0.5) * 1.05,
-        s: Math.max(0.3, p.s * (0.8 + rnd() * 0.2)),
+        s: Math.max(0.28, p.s * (0.75 + rnd() * 0.2)),
       };
       const clone = this.placeCloneAt(jittered, kind === 'panda' ? panda : dal);
       this.hiddenPlush.push(clone);
@@ -916,13 +918,32 @@ export class TableScene {
     clone.position.y += p.y - bb.min.y; // バウンディング底面を候補地の接地面へ
     // 接地スナップ（契約29）: 実サーフェス（棚段・天面・座面）へ吸着し目測高さの誤差を吸収。
     // スポット選択はシード同期のまま＝吸着は各端末の見た目補正のみで同期に影響しない。
+    let baseY = p.y;
     if (this.roomGlb) {
       const ray = new THREE.Raycaster();
       ray.set(new THREE.Vector3(p.x, p.y + 0.6, p.z), new THREE.Vector3(0, -1, 0));
       const hit = ray
         .intersectObject(this.roomGlb, true)
         .find((h: { point: { y: number } }) => h.point.y > p.y - 0.35 && h.point.y < p.y + 0.55);
-      if (hit) clone.position.y += hit.point.y - p.y;
+      if (hit) {
+        clone.position.y += hit.point.y - p.y;
+        baseY = hit.point.y;
+      }
+      // 頭上クリアランス自動縮小（契約31・2026-08-12 干渉報告の根本対策）: 接地点から真上へ
+      // レイキャストし、上の棚板等までの空きが個体の高さ+余白に足りなければ収まるまで縮小する。
+      // モデル形状（パンダ/ダルメシアンの耳など）に依らずどの個体でも干渉しない。見た目補正のみ＝同期無関係。
+      clone.updateMatrixWorld(true);
+      const bb2 = new THREE.Box3().setFromObject(clone);
+      const height = bb2.max.y - bb2.min.y;
+      ray.set(new THREE.Vector3(p.x, baseY + 0.03, p.z), new THREE.Vector3(0, 1, 0));
+      const up = ray.intersectObject(this.roomGlb, true).find((h: { distance: number }) => h.distance > 0.05);
+      if (up && up.distance < height * 1.12) {
+        const k = Math.max(0.55, (up.distance * 0.88) / height);
+        clone.scale.multiplyScalar(k);
+        clone.updateMatrixWorld(true);
+        const bb3 = new THREE.Box3().setFromObject(clone);
+        clone.position.y += baseY - bb3.min.y; // 縮小後に再接地
+      }
     }
     clone.updateMatrixWorld(true);
     this.scene.add(clone);
@@ -2379,13 +2400,15 @@ export class TableScene {
     // 同期レンダして JPEG dataURL を返す。preserveDrawingBuffer なしでも同一タスク内の
     // renderer.render → toDataURL は有効。全候補の干渉（めり込み/浮き）敵対レビュー用。
     // i=-1 でテスト個体を撤去。通常プレイでは呼ばれない。
-    (el as unknown as { __spotShot?: (i: number, ang?: number) => string | null }).__spotShot = (i, ang = 0) => {
+    (el as unknown as { __spotShot?: (i: number, ang?: number, kind?: string) => string | null }).__spotShot = (
+      i, ang = 0, kind,
+    ) => {
       if (this.testPlush) {
         this.scene.remove(this.testPlush);
         this.testPlush = null;
       }
       const p = HIDE_SPOTS[i];
-      const src = this.plushSrc.panda ?? this.plushSrc.dalmatian;
+      const src = (kind === 'dalmatian' ? this.plushSrc.dalmatian : this.plushSrc.panda) ?? this.plushSrc.dalmatian;
       if (i < 0 || !p || !src) return null;
       this.testPlush = this.placeCloneAt(p, src);
       const headY = this.testPlush.position.y + 1.05 * p.s * 0.5;

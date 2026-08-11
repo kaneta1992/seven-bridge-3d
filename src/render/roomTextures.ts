@@ -26,9 +26,10 @@ function rng(seed: number): () => number {
  */
 export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasTexture; roughnessMap: THREE.CanvasTexture } {
   const S = 1024;
-  const rows = 8; // 1タイル8枚 → repeat 6 で板幅 ~0.37m
+  const rows = 6; // 1タイル6枚 → repeat 5 で板幅 0.6m（契約31: 大きな板で床の情報が読める距離を伸ばす）
   const rh = S / rows;
-  const base = ['#5e4531', '#55402c', '#644d36', '#4e3a28', '#5a432e', '#6a5038'];
+  // 契約31: のっぺり解消の再強化 — 明度を一段上げ、板同士の色差（コントラスト）を拡大
+  const base = ['#6d5339', '#5c452e', '#7a6444', '#55402a', '#685039', '#7f6a48'];
   interface Painter {
     plank(x: number, y: number, len: number, colIdx: number, r01: number): void;
     grain(x0: number, y0: number, x1: number, y1: number, w: number, k: number): void;
@@ -66,11 +67,11 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
     plank: (x, y, len, ci, warp) => {
       cg.fillStyle = base[ci]!;
       cg.fillRect(x, y + 1, len - 2, rh - 2);
-      // 板内の明暗グラデ（反り感・のっぺり解消の要）
+      // 板内の明暗グラデ（反り感・のっぺり解消の要。契約31でコントラスト増）
       const lg = cg.createLinearGradient(x, y, x + len, y);
-      lg.addColorStop(0, `rgba(255,225,190,${0.05 + warp * 0.05})`);
-      lg.addColorStop(0.5, 'rgba(20,10,5,0.06)');
-      lg.addColorStop(1, `rgba(255,225,190,${0.03 + warp * 0.04})`);
+      lg.addColorStop(0, `rgba(255,228,190,${0.1 + warp * 0.08})`);
+      lg.addColorStop(0.5, 'rgba(20,10,5,0.12)');
+      lg.addColorStop(1, `rgba(255,228,190,${0.06 + warp * 0.07})`);
       cg.fillStyle = lg;
       cg.fillRect(x, y + 1, len - 2, rh - 2);
     },
@@ -138,7 +139,7 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
   const [nc, ng] = canvas(S);
   const nd = ng.createImageData(S, S);
   const H = (x: number, y: number): number => hd[(((y + S) % S) * S + ((x + S) % S)) * 4]!;
-  const STR = 2.2; // 法線強度
+  const STR = 3.2; // 法線強度（契約31: 目地・木目の起伏を強調）
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
       const dx = (H(x + 1, y) - H(x - 1, y)) / 255;
@@ -152,13 +153,13 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
     }
   }
   ng.putImageData(nd, 0, 0);
-  // ---- 粗さ: 目地=ザラ(255)・板面=木のセミグロス(170〜200)・木目でムラ ----
+  // ---- 粗さ: 目地=ザラ(255)・板面=磨いた木のツヤ(130〜165)・木目でムラ（契約31: ランプの映り込みを出す） ----
   const [rc, rgx] = canvas(S);
-  rgx.fillStyle = 'rgb(190,190,190)';
+  rgx.fillStyle = 'rgb(170,170,170)';
   rgx.fillRect(0, 0, S, S);
   layout({
     plank: (x, y, len, ci) => {
-      const v = 165 + (ci % 3) * 12;
+      const v = 128 + (ci % 3) * 14;
       rgx.fillStyle = `rgb(${v},${v},${v})`;
       rgx.fillRect(x, y + 1, len - 2, rh - 2);
     },
@@ -189,7 +190,7 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
   const finish = (cnv: HTMLCanvasElement, srgb: boolean): THREE.CanvasTexture => {
     const t = new THREE.CanvasTexture(cnv);
     t.wrapS = t.wrapT = THREE.RepeatWrapping ?? 1000;
-    t.repeat.set(6, 6);
+    t.repeat.set(5, 5); // 板幅 0.6m（契約31）
     t.anisotropy = 8;
     if (srgb) t.colorSpace = THREE.SRGBColorSpace ?? 'srgb';
     return t;

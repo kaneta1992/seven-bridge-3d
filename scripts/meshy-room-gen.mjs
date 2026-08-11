@@ -52,6 +52,13 @@ const ITEMS = [
   { name: 'candleset', poly: 2500, prompt: 'three cream candles of different heights on a small brass tray' },
   { name: 'photoframes', poly: 2000, prompt: 'two small wooden picture frames standing side by side' },
   { name: 'miniplant', poly: 2500, prompt: 'small succulent plant in a tiny ceramic pot' },
+  // ---- 第5弾（R34・契約31: 囮ぬいぐるみ+カモフラ小物＝難度8への引き上げ）----
+  { name: 'pengplush', poly: 4000, prompt: 'penguin plush toy sitting, black and white, cute round body' },
+  { name: 'bunnyplush', poly: 4000, prompt: 'white rabbit plush toy sitting, floppy ears with pink inner ears' },
+  { name: 'teddybear', poly: 4000, prompt: 'classic teddy bear plush toy sitting, light brown fur, stitched smile' },
+  { name: 'catplush', poly: 4000, prompt: 'gray tabby cat plush toy sitting, cute button eyes' },
+  { name: 'blanketpile', poly: 3000, prompt: 'stack of folded knit blankets, colorful boho patterns' },
+  { name: 'pillowpair', poly: 3000, prompt: 'two colorful patterned throw pillows leaning against each other' },
 ];
 
 mkdirSync(OUT, { recursive: true });
