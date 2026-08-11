@@ -54,6 +54,7 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 - ビューポート0x0のときは ref クリックが (8,8) に落ちる → JS で直接 click
 - scene.ts は視覚上の共面回避に y 微差を多用。カード配置をいじるときは distinctY を壊さないこと
 - ドラッグ中の再描画競合: 並び替え実装はドラッグ中の driver 再描画を保留する設計（詳細は app.ts の attachHandPointer 周辺コメント）
+- **ドロップ標的のライフサイクル順序（2026-08-11 実バグ）**: `hideDropTargets()` は attachableMelds を消すため、**必ず resolveDrop() の後に呼ぶ**。先に呼ぶと dropTargetAt のメルド判定が全て素通りし「場=公開」へ化ける（ホバーの判定円は光るのにドロップだけ失敗する紛らわしい症状になる）。付け札D&Dを触ったら必ず「実ポインタ経路」（pointerdown→move→up の合成イベント＋__dropProbe グリッド）で検証すること — resolveDrop 直接呼び出しの検証はこのクラスのバグを素通しする
 
 ## 通信UX（R9以降）
 - `src/net/lobbyChannel.ts`: 公開ルーム一覧（固定ロビーチャネル LOBBY_ROOM への定期広告・受信側TTL・送受信両側 sanitizeRoomAd で {code,hostName,count,rounds} 以外を遮断）
