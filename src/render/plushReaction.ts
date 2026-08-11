@@ -16,18 +16,21 @@
 import * as THREE from 'three';
 import type { ParticleSystem } from './particles';
 
+const TMP_HEART = new THREE.Vector3(); // ハート放出位置の一時ベクトル（毎フレーム生成を避ける）
+
 // ---- 検知パラメータ（要求1: 数値は報告に記載）------------------------------------
 const GAZE_COS = Math.cos((10 * Math.PI) / 180); // 視線と頭部方向の角度差 ≤ 10°（頭部が視界中心付近）
 const ZOOM_FOV_MAX = 40; // ズームイン判定: fov ≤ 40（既定 46/縦62 より十分小さい＝寄っている）
-const GAZE_HOLD = 0.45; // 注視デバウンス 0.45s（チラ見では発火しない）
-const COOLDOWN = 24; // 1体あたりのクールダウン 24s（契約 20〜30s の範囲）
+const GAZE_HOLD = 1.5; // 注視デバウンス 1.5s（2026-08-12 ユーザー指定: ズームして1.5秒見つめたら発火）
+const COOLDOWN = 10; // 1体あたりのクールダウン 10s（2026-08-12 ユーザー指定）
+const HEART_INTERVAL = 0.45; // エモーション中は頭上へハートを繰り返し出す間隔(s)
 
 interface Reaction {
   t: number;
   dur: number;
   faceYaw: number; // カメラの方へ向き直る目標ヨー
   reduced: boolean;
-  heartsFired: boolean;
+  nextHeartAt: number; // 次にハートを出す時刻(t基準)。エモーション中は頭上へ繰り返し出す
 }
 
 interface Doll {
@@ -129,10 +132,11 @@ export class PlushReactions {
     const faceYaw = Math.atan2(camPos.x - d.homePos.x, camPos.z - d.homePos.z);
     d.reaction = {
       t: 0,
-      dur: d.kind === 'panda' ? (reduced ? 1.1 : 1.6) : (reduced ? 1.3 : 1.7),
+      // 派手化（2026-08-12）: 尺を少し延ばし、はね・揺れの回数と振幅を増やして見応えを出す。
+      dur: d.kind === 'panda' ? (reduced ? 1.2 : 2.1) : (reduced ? 1.4 : 2.2),
       faceYaw,
       reduced,
-      heartsFired: false,
+      nextHeartAt: 0.25, // エモーション開始直後から頭上へハートを繰り返し出す
     };
     // パンダ=弾む音、ダルメシアン=挨拶音（app.ts で AudioKit へ）。
     this.onSfx?.(d.kind === 'panda' ? 'bounce' : 'wave');
@@ -152,37 +156,43 @@ export class PlushReactions {
     return true;
   }
 
-  /** パンダ: ぷるぷる（squash&stretch）→ ぴょんと2回。カメラへ軽く向き直り、終わりに元へ戻る。 */
+  /** パンダ: ぷるぷる（squash&stretch）→ 元気に3回はねる（派手化）。カメラへ向き直り、終わりに元へ戻る。 */
   private animatePanda(d: Doll, r: Reaction, u: number): void {
     const t = r.t;
-    const quiverEnd = 0.24;
+    const quiverEnd = 0.2;
     let f = 1; // scale.y の倍率（体積保存で x,z を逆補正）
     let lift = 0;
+    let rotZ = d.homeRotZ;
     if (u < quiverEnd) {
-      f = 1 + (r.reduced ? 0.02 : 0.06) * Math.sin(t * 38);
+      f = 1 + (r.reduced ? 0.03 : 0.09) * Math.sin(t * 42);
     } else {
       const hu = (u - quiverEnd) / (1 - quiverEnd); // 0..1
-      const hop = (hu * 2) % 1; // 2ホップ分の各 0..1
-      const H = r.reduced ? 0.1 : 0.34;
+      const hop = (hu * 3) % 1; // 3ホップ分の各 0..1（派手化: 2→3回）
+      const H = r.reduced ? 0.12 : 0.52; // 跳躍高も増量（0.34→0.52）
       lift = H * Math.sin(Math.PI * hop);
-      f = 1 + (r.reduced ? 0.04 : 0.1) * Math.sin(Math.PI * hop);
+      f = 1 + (r.reduced ? 0.05 : 0.16) * Math.sin(Math.PI * hop);
+      // 空中で軽くひねる（左右交互）と楽しさが出る。包絡 sin で着地時は 0 に戻る。
+      const dirSign = Math.floor(hu * 3) % 2 === 0 ? 1 : -1;
+      rotZ = d.homeRotZ + dirSign * (r.reduced ? 0.03 : 0.1) * Math.sin(Math.PI * hop);
     }
-    this.applyTransform(d, f, lift, this.turnYaw(d, r, u), d.homeRotZ);
-    this.maybeHearts(d, r, u, quiverEnd, 14);
+    this.applyTransform(d, f, lift, this.turnYaw(d, r, u), rotZ);
+    this.maybeHearts(d, r, 12);
   }
 
-  /** ダルメシアン: カメラへ小さく向き直り＋左右に嬉しそうに揺れて（ロール）＋1回大きくはねる。 */
+  /** ダルメシアン: カメラへ向き直り＋大きく左右に揺れて（ロール）＋高く2回はねる（派手化）。 */
   private animateDalmatian(d: Doll, r: Reaction, u: number): void {
     const t = r.t;
-    const arch = Math.sin(Math.PI * u); // 端で0・中央で最大（1回のはね/揺れ包絡）
-    const H = r.reduced ? 0.08 : 0.26;
-    const lift = H * arch;
-    const f = 1 + (r.reduced ? 0.03 : 0.08) * arch;
-    // 左右の揺れ = ロール（rotation.z）。包絡で始端/終端は 0 に収束＝スムーズ復帰。
-    const swayAmp = r.reduced ? 0.05 : 0.14;
-    const rotZ = d.homeRotZ + swayAmp * arch * Math.sin(t * 9);
+    const arch = Math.sin(Math.PI * u); // 端で0・中央で最大（全体包絡＝スムーズ復帰）
+    // 派手化: 1回→2回の大ジャンプ（前半・後半に1回ずつ）。
+    const hop = (u * 2) % 1;
+    const H = r.reduced ? 0.1 : 0.44; // 0.26→0.44
+    const lift = H * Math.sin(Math.PI * hop) * (0.6 + 0.4 * arch);
+    const f = 1 + (r.reduced ? 0.04 : 0.13) * Math.sin(Math.PI * hop);
+    // 左右の揺れ = ロール。振幅増（0.14→0.24）。包絡で始端/終端は 0 に収束。
+    const swayAmp = r.reduced ? 0.06 : 0.24;
+    const rotZ = d.homeRotZ + swayAmp * arch * Math.sin(t * 10);
     this.applyTransform(d, f, lift, this.turnYaw(d, r, u), rotZ);
-    this.maybeHearts(d, r, u, 0.2, 16);
+    this.maybeHearts(d, r, 13);
   }
 
   /** カメラの方へ向き直り、終わりに元のヨーへ戻す（up[0,0.28]→hold→down[0.72,1]・u=1でホーム）。 */
@@ -203,10 +213,16 @@ export class PlushReactions {
     d.obj.rotation.z = rotZ;
   }
 
-  private maybeHearts(d: Doll, r: Reaction, u: number, after: number, count: number): void {
-    if (!r.heartsFired && u >= after) {
-      r.heartsFired = true;
-      if (!r.reduced) this.particles.hearts(d.head, count); // reduced-motion では抑制（E4）
+  /** エモーション中は HEART_INTERVAL ごとに頭上へハートを繰り返し出す（2026-08-12 ユーザー指定）。 */
+  private maybeHearts(d: Doll, r: Reaction, count: number): void {
+    if (r.t >= r.nextHeartAt && r.t < r.dur - 0.25) {
+      r.nextHeartAt = r.t + HEART_INTERVAL;
+      if (!r.reduced) {
+        // 頭上（頭部の少し上）から放出。跳ねている間も頭に追従して見えるよう現在の持ち上げ量を足す。
+        const lift = d.obj.position.y - d.homePos.y;
+        TMP_HEART.set(d.head.x, d.head.y + 0.22 + lift, d.head.z);
+        this.particles.hearts(TMP_HEART, count);
+      }
     }
   }
 

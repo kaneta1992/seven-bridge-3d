@@ -96,12 +96,12 @@ describe('ボット判断ロジック（純粋・視界=自席 PlayerView）', (
     expect(acts[0]).toMatchObject({ type: 'pon', player: 'me' });
   });
 
-  it('NPC 名は「NPC・」印付きで衝突しない', () => {
+  it('NPC 名は「（NPC）」印付きで衝突しない', () => {
     const taken = new Set<string>();
     const a = pickNpcName(taken);
     taken.add(a);
     const b = pickNpcName(taken);
-    expect(a.startsWith('NPC')).toBe(true);
+    expect(a.endsWith('（NPC）')).toBe(true);
     expect(a).not.toBe(b);
     expect(a).toContain(NPC_NAME_POOL[0]);
   });
@@ -174,7 +174,7 @@ describe('LocalDriver 1人プレイ（NPC 込み進行）', () => {
   it('固定自席モード: currentPlayerId は人間席固定、claimants は自席のみ、applyBot は NPC 席限定', () => {
     const players = [
       { id: 'you', name: 'H' },
-      { id: 'npc0', name: 'NPC・ロボ太' },
+      { id: 'npc0', name: 'あけみ（NPC）' },
     ];
     const driver = new LocalDriver({ players, totalRounds: 1, seed: 9, selfId: 'you', npcIds: ['npc0'] });
     expect(driver.currentPlayerId()).toBe('you');
@@ -213,7 +213,7 @@ describe('HostDriver applyBot（権威適用・E7 非破壊）', () => {
     const host = new HostDriver({
       players: [
         { id: 'h', name: 'H' },
-        { id: 'npc0', name: 'NPC・カル子' },
+        { id: 'npc0', name: 'カル子（NPC）' },
         { id: 'g1', name: 'G1' },
       ],
       selfPk: 'h',

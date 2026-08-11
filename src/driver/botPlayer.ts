@@ -14,17 +14,17 @@ import type { GameDriver } from './types';
 
 // ---- NPC 名プール（日本語・NPC と分かる表記） ----------------------------
 
-/** 親しみやすい日本語のベース名。表示は「NPC・<名>」で NPC と分かる印を付ける。 */
+/** 親しみやすい日本語のベース名。表示は「<名>（NPC）」で NPC と分かる印を付ける。 */
 export const NPC_NAME_POOL = ['あけみ', 'カル子', 'ジャック', 'ポン太', 'チー子', 'ナナ'] as const;
 
 /** 既存名と衝突しない NPC 表示名を選ぶ（プール枯渇時は連番でフォールバック）。 */
 export function pickNpcName(taken: ReadonlySet<string>): string {
   for (const base of NPC_NAME_POOL) {
-    const name = `NPC・${base}`;
+    const name = `${base}（NPC）`;
     if (!taken.has(name)) return name;
   }
   for (let i = 2; ; i++) {
-    const name = `NPC${i}`;
+    const name = `ボット${i}（NPC）`;
     if (!taken.has(name)) return name;
   }
 }
