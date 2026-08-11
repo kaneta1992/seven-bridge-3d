@@ -12,6 +12,8 @@ import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from 
 import { disposeFelt, feltTexture } from './felt';
 import { buildPlushDolls, disposePlushTextures } from './plush';
 import { PlushReactions } from './plushReaction';
+import { HIDE_SPOTS, hashSeed, type HideSpot } from './hideSpots';
+import { shuffle } from '../core';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
@@ -211,6 +213,13 @@ export class TableScene {
   // 契約25(R27): Meshy 家具ロード成功時に除去するプロシージャル家具メッシュ / 統合家具GLB
   private swapFurniture: THREE.Mesh[] = [];
   private roomGlb: THREE.Object3D | null = null;
+  // 契約26(R28): かくれんぼ。plushSrc はロード済み GLB（クローン元）。hideSeed は
+  // 「ルームコード#ラウンド」等の共有シード（app が setHideSeed で注入・全クライアント同一）。
+  private plushSrc: { panda?: THREE.Object3D; dalmatian?: THREE.Object3D } = {};
+  private hideSeed: string | null = null;
+  private hiddenPlush: THREE.Object3D[] = [];
+  /** かくれんぼ発見通知（初回注視リアクション時に一度だけ・app がコールアウト/SFXへ接続）。 */
+  onHiddenFound: ((kind: 'dalmatian' | 'panda') => void) | null = null;
   // ぬいぐるみ「見つめると反応する」リアクション（契約24）。注視+ズーム検知→両体の transform 演出。
   private plushReactions: PlushReactions | null = null;
   // リアクションの効果音トリガ（app.ts が AudioKit へ接続する・src/render は音を持たない）。
@@ -807,6 +816,58 @@ export class TableScene {
   }
 
   /**
+   * 契約26(R28): かくれんぼの共有シードを注入する。「ルームコード#ラウンド」のように全クライアントが
+   * 独立に同じ値を導出できる文字列を渡すこと（候補地リストは純計算で全端末同一 → シードが同じなら
+   * 配置も同一＝プロトコル変更なしで同期する）。シードが変わるたび（＝ラウンド毎）に置き直す。
+   */
+  setHideSeed(seed: string): void {
+    if (this.hideSeed === seed) return;
+    this.hideSeed = seed;
+    this.placeHiddenPlush();
+  }
+
+  /** 隠れパンダ+隠れダルメシアンを配置する（シードと両クローン元が揃うまでは何もしない）。 */
+  private placeHiddenPlush(): void {
+    const panda = this.plushSrc.panda;
+    const dal = this.plushSrc.dalmatian;
+    if (!this.hideSeed || !panda || !dal || HIDE_SPOTS.length < 2) return;
+    for (const o of this.hiddenPlush) {
+      this.plushReactions?.unregister(o);
+      this.scene.remove(o); // ジオメトリ/マテリアルはクローン元と共有＝dispose しない（E3）
+    }
+    this.hiddenPlush = [];
+    const order = shuffle(HIDE_SPOTS as HideSpot[], hashSeed(this.hideSeed)).result;
+    const first = order[0]!;
+    // 2体目は1体目から3m以上離れた最初の候補（固まって出ると1回で両方見つかるため）。
+    const second = order.find((p, i) => i > 0 && Math.hypot(p.x - first.x, p.z - first.z) >= 3) ?? order[1]!;
+    const picks: [HideSpot, 'panda' | 'dalmatian'][] = [
+      [first, 'panda'],
+      [second, 'dalmatian'],
+    ];
+    const bb = new THREE.Box3();
+    for (const [p, kind] of picks) {
+      const clone = (kind === 'panda' ? panda : dal).clone(true);
+      clone.rotation.set(0, p.yaw, 0);
+      clone.scale.multiplyScalar(p.s);
+      clone.position.set(p.x, 0, p.z);
+      clone.updateMatrixWorld(true);
+      bb.setFromObject(clone);
+      clone.position.y += p.y - bb.min.y; // バウンディング底面を候補地の接地面へ
+      clone.updateMatrixWorld(true);
+      this.scene.add(clone);
+      this.hiddenPlush.push(clone);
+      // 発見＝ズーム注視の初回リアクション発火。以降の再注視はリアクションのみ（通知は一度だけ）。
+      let found = false;
+      this.plushReactions?.register(kind, clone, () => {
+        if (found) return;
+        found = true;
+        this.onHiddenFound?.(kind);
+      });
+    }
+    this.wake();
+  }
+
+  /**
    * public/models/{panda,dalmatian}.glb を非同期ロードし、成功した個体だけプロシージャル版と
    * 差し替える（404/失敗は無視＝フォールバック）。モデルはバウンディングボックスから座高を
    * 正規化し、ソファ座面へ接地・部屋中央向きに配置する。
@@ -837,6 +898,9 @@ export class TableScene {
       this.scene.add(obj);
       this.plushGlbs.push(obj);
       this.plushReactions?.register(kind, obj); // リアクション対象として登録（契約24）
+      // かくれんぼのクローン元として保持し、シードが既に来ていれば配置を試みる（契約26）。
+      this.plushSrc[kind] = obj;
+      this.placeHiddenPlush();
     };
     // 最初の1体が読めた時点でプロシージャル版を非表示（重なり防止）。両方失敗ならそのまま残る。
     const hideProcedural = (): void => {
@@ -2249,6 +2313,12 @@ export class TableScene {
       }
       this.wake();
     };
+    // 検証用（契約26）: かくれんぼの現在配置（[パンダ, ダルメシアン] の順・ワールド座標とスケール）。
+    (el as unknown as { __hiddenProbe?: () => unknown }).__hiddenProbe = () =>
+      this.hiddenPlush.map((o) => ({
+        pos: [o.position.x, o.position.y, o.position.z].map((v) => +v.toFixed(2)),
+        scale: +o.scale.x.toFixed(3),
+      }));
     // 検証用: 卓面ワールド点(x,0,z)を現カメラで画面座標へ投影し、その座標で dropTargetAt を
     // 逆引きする。オービット後もレイキャストがカメラへ追従する（E3）ことの確認に使う。
     (el as unknown as { __dropProbe?: (x: number, z: number) => unknown }).__dropProbe = (x, z) => {
@@ -2772,6 +2842,10 @@ export class TableScene {
       this.scene.remove(this.roomGlb);
       this.roomGlb = null;
     }
+    // かくれんぼのクローン（契約26）: 資源はクローン元（plushGlbs）と共有のため remove のみ
+    for (const o of this.hiddenPlush) this.scene.remove(o);
+    this.hiddenPlush = [];
+    this.plushSrc = {};
     // GLB 未ロードのまま破棄される場合に備え、swap 家具（クローンマテリアル）も明示解放（契約25）
     for (const mesh of this.swapFurniture) {
       mesh.geometry?.dispose?.();

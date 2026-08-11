@@ -41,6 +41,7 @@ interface Doll {
   homeRotZ: number;
   homeScale: THREE.Vector3;
   head: THREE.Vector3; // 注視判定に使う頭部ワールド座標
+  onFire?: () => void; // 発火時コールバック（かくれんぼの発見通知・契約26）
   gazeT: number;
   armed: boolean; // 一度発火したら視線を外す（注視解除）まで再発火しない
   cooldownUntil: number;
@@ -61,11 +62,15 @@ export class PlushReactions {
 
   constructor(private particles: ParticleSystem) {}
 
-  /** 配置済みの静的モデルを個体登録する（scene.loadPlushGlbs から成功個体ごとに呼ぶ）。 */
-  register(kind: 'dalmatian' | 'panda', obj: THREE.Object3D): void {
+  /**
+   * 配置済みの静的モデルを個体登録する（scene.loadPlushGlbs / かくれんぼ配置から成功個体ごとに呼ぶ）。
+   * onFire はリアクション発火時コールバック（契約26: 隠れぬいぐるみの「みつけた！」通知に使う）。
+   */
+  register(kind: 'dalmatian' | 'panda', obj: THREE.Object3D, onFire?: () => void): void {
     this.dolls.push({
       kind,
       obj,
+      onFire,
       homePos: obj.position.clone(),
       homeYaw: obj.rotation.y,
       homeRotZ: obj.rotation.z,
@@ -145,6 +150,12 @@ export class PlushReactions {
     };
     // パンダ=弾む音、ダルメシアン=挨拶音（app.ts で AudioKit へ）。
     this.onSfx?.(d.kind === 'panda' ? 'bounce' : 'wave');
+    d.onFire?.();
+  }
+
+  /** 個体の登録解除（かくれんぼのラウンド切替で古い隠れ個体を外す・契約26）。 */
+  unregister(obj: THREE.Object3D): void {
+    this.dolls = this.dolls.filter((d) => d.obj !== obj);
   }
 
   /** 進行中リアクションを1フレーム駆動。完了で復帰し false を返す（＝以後 busy を落とす）。 */

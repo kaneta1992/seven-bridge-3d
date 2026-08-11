@@ -122,6 +122,8 @@ export class GameUI {
   // 演出（ジューシー化ラウンド）: SFX・コールアウト・イベント検出用の直近状態
   private audio: AudioKit | null = null;
   private callouts: Callouts | null = null;
+  // かくれんぼ（契約26）: 隠れぬいぐるみ配置シードのベース（ルームコード or ソロ乱数）
+  private hideBase = '';
   private vignetteEl: HTMLElement | null = null;
   private fxTimers: number[] = [];
   private evRound = -1;
@@ -620,6 +622,13 @@ export class GameUI {
       if (kind === 'wave') this.audio?.plushWave();
       else this.audio?.plushBounce();
     };
+    // かくれんぼ（契約26）: 対局ごとの共有シードベース。通信対戦はルームコード（全員が既知の共有値）、
+    // ソロ/ホットシートは同期不要なのでゲーム毎の乱数。発見時は一度だけコールアウトで祝う。
+    this.hideBase = this.waitInfo?.code ?? `solo-${Math.random().toString(36).slice(2, 10)}`;
+    this.scene.onHiddenFound = (kind) => {
+      this.callouts?.showBanner(kind === 'panda' ? '🐼 かくれんぼパンダ みつけた！' : '🐶 かくれんぼダルメシアン みつけた！');
+      this.audio?.plushBounce();
+    };
     this.driver = driver;
     this.unsub = driver.subscribe(() => this.render());
     // 権威者（ホットシート/ホスト）だけが最初のラウンドを配る。ゲストはスナップショットで受け取る。
@@ -683,6 +692,9 @@ export class GameUI {
   private renderScene(view: PlayerView): void {
     if (!this.scene) return;
     this.scene.update(view);
+    // かくれんぼ（契約26）: シード = 共有ベース（ルームコード/ソロ乱数）+ ラウンド番号。
+    // 全クライアントが独立に同じ文字列を導出でき、ラウンド毎に隠れ場所が変わる。
+    if (view.round > 0) this.scene.setHideSeed(`${this.hideBase}#${view.round}`);
   }
 
   private render(): void {
