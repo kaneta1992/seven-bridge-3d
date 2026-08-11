@@ -19,6 +19,7 @@ declare module 'three' {
   export class SphereGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class CapsuleGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Plane { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class Box3 { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Sprite { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class SpriteMaterial { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Material { [k: string]: AnyX; constructor(...a: AnyX[]); }
@@ -61,4 +62,18 @@ declare module 'three/examples/jsm/postprocessing/ShaderPass.js' {
 declare module 'three/examples/jsm/utils/BufferGeometryUtils.js' {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export function mergeGeometries(geometries: any[], useGroups?: boolean): any;
+}
+declare module 'three/examples/jsm/loaders/GLTFLoader.js' {
+  import type { Object3D } from 'three';
+  export interface GLTF {
+    scene: Object3D;
+  }
+  export class GLTFLoader {
+    load(
+      url: string,
+      onLoad: (gltf: GLTF) => void,
+      onProgress?: ((e: unknown) => void) | undefined,
+      onError?: ((e: unknown) => void) | undefined,
+    ): void;
+  }
 }

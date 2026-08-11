@@ -4,6 +4,7 @@
 // 即時テレポートを避ける（要件§3.2）。ジオメトリ/マテリアルは共有し draw call を抑制（E5）。
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
@@ -204,6 +205,8 @@ export class TableScene {
   private attachableMelds = new Set<number>();
   // メルドごとの卓面外接矩形（ゾーン判定用・2026-08-11）。update() の配置時に再構築する。
   private meldBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number }>();
+  // Meshy生成のぬいぐるみGLB（読み込めた場合のみ・dispose対象。契約24）
+  private plushGlbs: THREE.Object3D[] = [];
   private handDragging = false; // 手札 D&D 中はカメラ操作を無視する（項目10）。
 
   // ホットシートの手番交代でカメラを自席へリセット（契約14項目3）。youIndex は「操作者＝視点席」で、
@@ -735,6 +738,59 @@ export class TableScene {
     // 部屋の光に馴染む。統合済みで +2 描画コールのみ（drawCalls は getRenderStats の calls に含まれる）。
     const plush = buildPlushDolls(floorY + 0.7, -wallZ + 1.0, 2.0);
     this.scene.add(plush.group);
+    // Meshy 生成の高品質 GLB があれば差し替える（無ければプロシージャル版のまま・契約24）。
+    this.loadPlushGlbs(plush.group, floorY + 0.7, -wallZ + 1.0, 2.0);
+  }
+
+  /**
+   * public/models/{panda,dalmatian}.glb を非同期ロードし、成功した個体だけプロシージャル版と
+   * 差し替える（404/失敗は無視＝フォールバック）。モデルはバウンディングボックスから座高を
+   * 正規化し、ソファ座面へ接地・部屋中央向きに配置する。
+   */
+  private loadPlushGlbs(proceduralGroup: THREE.Object3D, seatTopY: number, seatCenterX: number, zCenter: number): void {
+    const loader = new GLTFLoader();
+    const base = (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? './';
+    const targetHeight = 1.4; // プロシージャル版と同じ座高感
+    const place = (obj: THREE.Object3D, z: number): void => {
+      const box = new THREE.Box3().setFromObject(obj);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const s = targetHeight / Math.max(size.y, 0.001);
+      obj.scale.setScalar(s);
+      box.setFromObject(obj);
+      // 接地: バウンディング底面を座面に合わせ、背もたれ側へ少し寄せる
+      obj.position.set(seatCenterX - 0.1 - (box.min.x + box.max.x) / 2 + obj.position.x, seatTopY - box.min.y + obj.position.y, z - (box.min.z + box.max.z) / 2 + obj.position.z);
+      obj.rotation.y = Math.PI / 2; // 部屋中央（+X方向）を向く
+      obj.traverse((o: THREE.Object3D) => {
+        o.castShadow = false;
+        o.receiveShadow = false;
+        o.layers.set(0);
+      });
+      this.scene.add(obj);
+      this.plushGlbs.push(obj);
+    };
+    // 最初の1体が読めた時点でプロシージャル版を非表示（重なり防止）。両方失敗ならそのまま残る。
+    const hideProcedural = (): void => {
+      proceduralGroup.visible = false;
+    };
+    loader.load(
+      `${base}models/panda.glb`,
+      (gltf) => {
+        hideProcedural();
+        place(gltf.scene, zCenter + 0.45);
+      },
+      undefined,
+      () => undefined,
+    );
+    loader.load(
+      `${base}models/dalmatian.glb`,
+      (gltf) => {
+        hideProcedural();
+        place(gltf.scene, zCenter - 0.45);
+      },
+      undefined,
+      () => undefined,
+    );
   }
 
   // ---- カードメッシュ生成（共有ジオメトリ/マテリアル） --------------------
@@ -2543,6 +2599,23 @@ export class TableScene {
     disposeCardTextures();
     disposeFelt();
     disposePlushTextures(); // ぬいぐるみの斑点 Canvas テクスチャ（map は traverse では解放されない・E3）
+    // Meshy GLB のジオメトリ・マテリアル・テクスチャを明示解放（契約24）
+    for (const obj of this.plushGlbs) {
+      obj.traverse((o: THREE.Object3D) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) {
+          mesh.geometry?.dispose?.();
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const m of mats) {
+            const sm = m as THREE.MeshStandardMaterial;
+            sm.map?.dispose?.();
+            sm.dispose?.();
+          }
+        }
+      });
+      this.scene.remove(obj);
+    }
+    this.plushGlbs = [];
 
     this.known.clear();
     this.backById.clear();
