@@ -127,8 +127,10 @@ for (const inst of INSTANCES) {
   const cfg = MODELS[inst.model];
   const [bw, bh, bd] = m.bb.max.map((v, k) => v - m.bb.min[k]);
   // stretch: 軸別スケール（箱物）。それ以外は均等スケールで内接（歪みゼロ）。
+  // inst.scale: インスタンス毎の追加倍率（複製に大小差を付ける・R30）。
   const su = Math.min(cfg.size.w / bw, cfg.size.h / bh, cfg.size.d / bd);
-  const [sx, sy, sz] = cfg.stretch ? [cfg.size.w / bw, cfg.size.h / bh, cfg.size.d / bd] : [su, su, su];
+  const mul = inst.scale ?? 1;
+  const [sx, sy, sz] = (cfg.stretch ? [cfg.size.w / bw, cfg.size.h / bh, cfg.size.d / bd] : [su, su, su]).map((v) => v * mul);
   const cx = (m.bb.min[0] + m.bb.max[0]) / 2;
   const cz = (m.bb.min[2] + m.bb.max[2]) / 2;
   const y0 = m.bb.min[1];

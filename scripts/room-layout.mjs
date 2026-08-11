@@ -42,37 +42,61 @@ export const MODELS = {
 };
 
 // 配置インスタンス: 同じモデルを複数置ける（ジオメトリ複製・テクスチャ共有＝Meshy費用ゼロ）。
-// yOff: バウンディング底面の floorY からの持ち上げ（壁掛け用）。
+// yOff: バウンディング底面の floorY からの持ち上げ（壁掛け用）/ topY: 上面基準（天井吊り）/
+// scale: 追加倍率（複製に大小を付けて自然に）。
+//
+// R30（契約28）: 「壁沿いに整列して機械的」→ ゾーン単位のごちゃっと配置へ全面改訂。
+// - 生活ゾーン（ソファ回り / 暖炉回り / 読書ヌック / 2人掛けコーナー）に家具を寄せて群を作る
+// - 壁置きも角度を数度〜数十度振って整列感を崩す。複製（植物5/カゴ4/クッション3/プフ2/トランク2/
+//   サイドテーブル2/吊り植物3）で密度を出す
+// - 制約: 卓+ラグ（半径5.2）不可侵 / カメラリング（半径≈6.1・高さ2.7）付近は背の低い物のみ /
+//   背の高い家具は壁際 r>7 に留める
 export const INSTANCES = [
-  { model: 'sofa', x: -8.0, z: 2.0, yaw: 90 }, // -x壁・卓向き（ぬいぐるみ着座位置＝現行踏襲）
-  { model: 'armchair', x: 6.6, z: 5.6, yaw: -130 }, // 新規・+x/+z角から卓向き
-  { model: 'bookshelf', x: 8.4, z: -3.0, yaw: -90 }, // +x壁
-  { model: 'sideboard', x: 0.0, z: 8.45, yaw: 180 }, // +z壁（額の下）
-  { model: 'sidetable', x: -7.8, z: -1.6, yaw: 20 }, // ソファ脇
-  { model: 'coffeetable', x: -6.1, z: 2.0, yaw: 90 }, // 新規・ソファ前（ラグ外周）
-  { model: 'floorlamp', x: 8.0, z: -7.8, yaw: -45 }, // +x/-z角（本棚と窓の間）
-  { model: 'plant', x: 7.8, z: 7.8, yaw: 200 },
-  { model: 'plant', x: -7.8, z: 7.8, yaw: 40 },
-  { model: 'plant', x: -7.8, z: -6.0, yaw: 120 },
-  { model: 'tvstand', x: 3.5, z: -8.3, yaw: 0 }, // 新規・-z壁（窓の隣）
-  { model: 'basket', x: 4.3, z: -4.6, yaw: 0 },
-  { model: 'basket', x: -7.5, z: -3.6, yaw: 70 },
-  { model: 'pouf', x: 3.2, z: 2.8, yaw: 0 },
-  { model: 'wallshelf', x: 8.75, z: 2.5, yaw: -90, yOff: 2.6 }, // 新規・+x壁の高所
-  // ---- 第2弾（R29・契約27）。topY = バウンディング上面をこの高さへ（天井吊り用・梁の下面≈5.78） ----
-  { model: 'fireplace', x: -7.0, z: -8.5, yaw: 0 }, // -z壁・窓の左
-  { model: 'loveseat', x: 5.2, z: 8.2, yaw: 180 }, // +z壁・サイドボードと植物の間
-  { model: 'laddershelf', x: -5.0, z: 8.4, yaw: 180 }, // +z壁・左
-  { model: 'barcart', x: 3.0, z: 8.3, yaw: 180 }, // +z壁・サイドボード右
-  { model: 'recordconsole', x: 8.35, z: 0.3, yaw: -90 }, // +x壁・ウォールシェルフの下
-  { model: 'globe', x: 6.7, z: -6.6, yaw: 150 }, // フロアランプ手前
-  { model: 'coatrack', x: -8.35, z: -8.35, yaw: 45 }, // -x/-z角
-  { model: 'dogbed', x: -5.6, z: -7.7, yaw: 20 }, // 暖炉の前
-  { model: 'toybox', x: -8.1, z: 5.3, yaw: 80 }, // ソファ脇（+z側）
-  { model: 'cushions', x: 5.6, z: 1.0, yaw: -100 }, // ラグ外・アームチェア寄り
-  { model: 'mirror', x: 8.55, z: 4.3, yaw: -90 }, // +x壁・立て掛け
-  { model: 'chandelier', x: 0, z: -5.0, yaw: 0, topY: 5.78 }, // 梁から吊るす
-  { model: 'hangplant', x: -5.0, z: 3.5, yaw: 30, topY: 5.78 }, // 梁の吊り植物
+  // ---- ソファ・リビングゾーン（-x壁）: ぬいぐるみ2体の定位置は不変 ----
+  { model: 'sofa', x: -8.0, z: 2.0, yaw: 90 },
+  { model: 'coffeetable', x: -6.15, z: 2.1, yaw: 78 },
+  { model: 'pouf', x: -6.0, z: 3.6, yaw: 30 },
+  { model: 'toybox', x: -7.9, z: 4.9, yaw: 55 },
+  { model: 'dogbed', x: -7.55, z: -0.9, yaw: -15 },
+  { model: 'sidetable', x: -7.95, z: -2.15, yaw: 35 },
+  { model: 'basket', x: -6.7, z: -3.05, yaw: 100 },
+  { model: 'cushions', x: -5.85, z: 0.55, yaw: -60, scale: 0.9 },
+  { model: 'plant', x: -8.05, z: 6.6, yaw: 40 },
+  // ---- 暖炉・窓ゾーン（-z壁） ----
+  { model: 'fireplace', x: -6.9, z: -8.45, yaw: 0 },
+  { model: 'basket', x: -5.0, z: -8.1, yaw: 20, scale: 1.15 }, // 薪入れカゴ
+  { model: 'coatrack', x: -8.45, z: -8.3, yaw: 30 },
+  { model: 'plant', x: -8.0, z: -6.5, yaw: 120 },
+  { model: 'cushions', x: -2.0, z: -7.75, yaw: 200 }, // 窓の下
+  { model: 'tvstand', x: 2.6, z: -8.35, yaw: -6 },
+  { model: 'suitcases', x: 4.75, z: -8.0, yaw: 28 },
+  // ---- 読書ヌック（+x/-z角）: アームチェアを壁から離し卓向きに斜め置き ----
+  { model: 'armchair', x: 6.6, z: -6.2, yaw: -152 },
+  { model: 'globe', x: 5.35, z: -7.1, yaw: 170 },
+  { model: 'sidetable', x: 8.0, z: -5.0, yaw: -30, scale: 0.9 },
+  { model: 'floorlamp', x: 7.95, z: -7.6, yaw: -45 },
+  { model: 'suitcases', x: 8.35, z: -6.35, yaw: -75, scale: 0.85 },
+  // ---- +x壁 ----
+  { model: 'bookshelf', x: 8.45, z: -2.9, yaw: -90 },
+  { model: 'basket', x: 8.15, z: -0.95, yaw: -60, scale: 0.9 },
+  { model: 'recordconsole', x: 8.4, z: 0.6, yaw: -90 },
+  { model: 'wallshelf', x: 8.75, z: 2.5, yaw: -90, yOff: 2.6 },
+  { model: 'mirror', x: 8.5, z: 4.15, yaw: -102 },
+  // ---- 2人掛けコーナー（+x/+z角・斜め45°で卓向き） ----
+  { model: 'loveseat', x: 6.7, z: 6.9, yaw: -137 },
+  { model: 'pouf', x: 4.6, z: 5.55, yaw: 10, scale: 0.9 },
+  { model: 'cushions', x: 5.35, z: 4.35, yaw: 75 },
+  { model: 'plant', x: 8.2, z: 8.2, yaw: 200, scale: 0.85 }, // 2人掛けの背後の角
+  // ---- +z壁 ----
+  { model: 'sideboard', x: 0.3, z: 8.5, yaw: 180 },
+  { model: 'barcart', x: 3.0, z: 8.0, yaw: 160 },
+  { model: 'basket', x: -3.2, z: 8.25, yaw: 210, scale: 0.9 },
+  { model: 'laddershelf', x: -4.65, z: 8.3, yaw: 172 },
+  { model: 'plant', x: -6.35, z: 8.05, yaw: 300, scale: 0.9 },
+  { model: 'plant', x: -8.0, z: 7.9, yaw: 40 },
+  // ---- 天井（梁吊り: 梁は x=±5 と z=±5 に走る・下面≈5.78） ----
+  { model: 'chandelier', x: 0, z: -5.0, yaw: 0, topY: 5.78 },
+  { model: 'hangplant', x: -5.0, z: 3.5, yaw: 30, topY: 5.78 },
   { model: 'hangplant', x: 5.0, z: -3.5, yaw: 210, topY: 5.78 },
-  { model: 'suitcases', x: 6.2, z: -8.35, yaw: 10 }, // TV台とフロアランプの間
+  { model: 'hangplant', x: 5.0, z: 3.2, yaw: 120, topY: 5.78, scale: 0.85 },
 ];
