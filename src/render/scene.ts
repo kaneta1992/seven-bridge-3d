@@ -35,6 +35,9 @@ const MIN_ORBIT_PITCH = 0.14; // 仰角下限（卓すれすれ・約8°。遠�
 const MAX_ORBIT_PITCH = 1.45; // 仰角上限（ほぼ真上・約83°。卓が裏返らない）
 const ORBIT_YAW_SENS = 0.006; // 方位感度（rad/px）
 const ORBIT_PITCH_SENS = 0.006; // 仰角感度（rad/px）
+// 捨て札タップ判定（契約14項目2/E2）: これ以上動いたらスワイプ、これ以上時間がかかったら長押し扱い。
+const TAP_MOVE_MAX = 8; // px（手札 D&D の並び替え閾値と同値・一貫）
+const TAP_TIME_MAX = 500; // ms
 
 // 3D 卓上のドロップ標的（契約05項目1）。手札カードのドラッグ先を screen→3D で判定する。
 export type DropTarget =
@@ -54,6 +57,7 @@ interface CardObj {
   spawned: boolean;
   targetScale: number; // 目標スケール（メルドは席の混み具合で段階縮小・契約11。非メルドは1）
   meldId?: number; // 面カードが 3D メルドに属する場合の所属メルドID（レイキャスト付け札用・R4項目5）
+  spawnPos: THREE.Vector3; // 出現時の出発点（飛翔のスポーン元・契約14項目5の検証用に保持）
 }
 
 export class TableScene {
@@ -145,6 +149,20 @@ export class TableScene {
   private meldBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number }>();
   private handDragging = false; // 手札 D&D 中はカメラ操作を無視する（項目10）。
 
+  // ホットシートの手番交代でカメラを自席へリセット（契約14項目3）。youIndex は「操作者＝視点席」で、
+  // ホットシートは手番ごとに変わる（通信対戦は自席固定で不変）。前回と変わったら userControlled を
+  // 解除して aimCameraAt(youIndex) に戻す＝通信対戦では発火しない（youIndex 不変）ので現状維持になる。
+  private prevYouIndex = -1;
+  // 直近 update の現手番席（＝捨て札の出所推定に使う。鳴きウィンドウ外では claimWindow が無いため、
+  // 「前フレームで手番だった席」を捨てた席とみなす・契約14項目5）。
+  private prevCurSeat = -1;
+  // カメラが回り込んで視界を塞ぐ他家の浮遊手札（席index集合）。毎フレーム判定しヒステリシスで切替（項目4）。
+  private blockedSeats = new Set<number>();
+  // 3D 捨て札の山をタップしたときのコールバック（履歴ポップアップ・契約14項目2）。app.ts が登録する。
+  private onDiscardTap: (() => void) | null = null;
+  // タップ判定の候補（カメラ操作/手札D&Dと区別。移動閾値内・短時間・単一ポインタのみタップ成立・E2）。
+  private tapCand: { id: number; x: number; y: number; t: number; moved: boolean } | null = null;
+
   // 席名ビルボードラベル（契約05項目2）: Canvas テクスチャの Sprite（常にカメラ正対）。
   private labels = new Map<
     number,
@@ -174,10 +192,12 @@ export class TableScene {
     this.attachContextLossHandlers();
 
     this.scene = new THREE.Scene();
-    // 部屋の空間感（項目7）: 暖色の壁色をフォグ/背景に用い、囲われた家の部屋に見せる。壁メッシュが
-    // 視界を覆うため背景色は隙間の保険。フォグ遠方を壁半径に合わせ、壁が奥へ自然に溶ける。
-    this.scene.background = new THREE.Color('#1a1410');
-    this.scene.fog = new THREE.Fog('#241a12', 11, 30);
+    // 部屋の空間感（契約14項目1）: 暖色の壁色をフォグ/背景に用い、囲われた「明るい家の部屋」に見せる。
+    // 壁メッシュが視界を覆うため背景色は隙間の保険。フォグ遠方を壁半径に合わせ、壁が奥へ自然に溶ける。
+    // ティアを問わず暖色を明るめに保つ（低ティアは buildRoom の窓/ランプを省くため、この地色と
+    // buildEnvironment の環境光を明るくして「暗い部屋」に落ちないようにする）。
+    this.scene.background = new THREE.Color('#33271a');
+    this.scene.fog = new THREE.Fog('#40301f', 13, 34);
     if (this.quality.envMap) {
       this.envMap = this.buildEnvMap();
       this.scene.environment = this.envMap;
@@ -201,13 +221,20 @@ export class TableScene {
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 1,
     });
+    // 裏面（他家の空中手札・山札）は席の外側＝暗い壁を向くためキー/フィル光が当たりにくく暗く沈む
+    // （契約14項目7）。裏面テクスチャを弱い emissive として自発光させ、光の向きに依存せず柄が明るく
+    // 読めるようにする（emissiveMap = 同じ裏面テクスチャなので柄の陰影は保ったまま底上げされる）。
+    const backTex = backTexture();
     this.backMat = new THREE.MeshPhysicalMaterial({
-      map: backTexture(),
+      map: backTex,
+      emissive: new THREE.Color('#ffffff'),
+      emissiveMap: backTex,
+      emissiveIntensity: 0.42,
       roughness: 0.42,
       metalness: 0.05,
       clearcoat: 0.5,
       clearcoatRoughness: 0.3,
-      envMapIntensity: 0.4,
+      envMapIntensity: 0.5,
     });
 
     this.ringGeo = new THREE.RingGeometry(0.86, 1.0, 48);
@@ -283,10 +310,12 @@ export class TableScene {
   }
 
   private buildEnvironment(): void {
-    // 3灯構成（キー+リム+フィル）+ 半球/環境光 + 手番スポット。暖色寄りの家の部屋ライティング（項目7）。
-    this.scene.add(new THREE.AmbientLight(0xfff1dc, 0.4));
+    // 3灯構成（キー+リム+フィル）+ 半球/環境光 + 手番スポット。暖色寄りの「明るい家の部屋」（契約14項目1）。
+    // 環境光/半球光を全ティア共通で明るめに設定し、低ティア（buildRoom で窓/ランプを省くモバイル）でも
+    // 部屋が暗く沈まないようにする。ここは方向を持たない照明なので、席の外を向く裏面手札（項目7）にも効く。
+    this.scene.add(new THREE.AmbientLight(0xfff1dc, 0.62));
     // 半球光: 天井の暖色 ↓ 床の木色。冷たいスタジオ感を弱め室内の温かみを出す。
-    this.scene.add(new THREE.HemisphereLight(0xffe6c4, 0x3a2c1c, 0.5));
+    this.scene.add(new THREE.HemisphereLight(0xffe8c8, 0x4a3826, 0.78));
     this.buildRoom();
 
     const key = new THREE.DirectionalLight(0xfff4e0, 1.35);
@@ -376,16 +405,24 @@ export class TableScene {
     // BoxGeometry の面順: +x, -x, +y(天井), -y(床), +z, -z。面ごとに材質を割り当てる。
     const wall = (color: string): THREE.MeshStandardMaterial =>
       new THREE.MeshStandardMaterial({ color, roughness: 0.96, metalness: 0, side: THREE.BackSide });
-    const wallMat = wall('#4a3a2c'); // 壁: 暖色の塗り壁/板
-    const ceilMat = wall('#2c2118'); // 天井: 暗め
-    const floorMat = new THREE.MeshStandardMaterial({ color: '#3a2a1b', roughness: 0.98, side: THREE.BackSide }); // 床板
+    const wallMat = wall('#6b5540'); // 壁: 暖色の塗り壁/板（明るい家の部屋・契約14項目1）
+    const ceilMat = wall('#4a3a2a'); // 天井: 壁より一段暗い暖色
+    const floorMat = new THREE.MeshStandardMaterial({ color: '#5a4530', roughness: 0.98, side: THREE.BackSide }); // 床板
     const mats = [wallMat, wallMat.clone(), ceilMat, floorMat, wallMat.clone(), wallMat.clone()];
     const room = new THREE.Mesh(new THREE.BoxGeometry(S, H, S), mats);
     room.position.set(0, floorY + H / 2, 0);
     room.receiveShadow = false; // 内壁は影計算に含めない（コスト削減・見た目に不要）
     this.scene.add(room);
 
-    if (this.quality.name === 'low') return; // モバイルは壁のみで軽量化（窓/据置ライト省略）
+    if (this.quality.name === 'low') {
+      // モバイル（低ティア）は窓/据置ランプの追加ジオメトリ・点光源を省いて軽量化するが、
+      // 明るさ・暖かみは落とさない（契約14項目1）。方向を持たない安価な暖色フィルを1灯だけ足し、
+      // 卓と裏面手札を上方から満遍なく持ち上げる（影・追加メッシュなしでコストはほぼゼロ）。
+      const softFill = new THREE.DirectionalLight(0xffe6c2, 0.55);
+      softFill.position.set(0, 9, 2);
+      this.scene.add(softFill);
+      return;
+    }
 
     // 窓（-z 壁に暖色の外光パネル）: 発光は MeshBasic（Bloom 非対象レイヤ0）で表現。夕方の家の窓。
     const winW = 5.4;
@@ -504,6 +541,29 @@ export class TableScene {
     return out;
   }
 
+  // ---- カード移動の飛翔の出発点（契約14項目5: 完全トレーサビリティ） ------------
+  // 新規に現れる面カード（捨て札・メルド公開・付け札）を、その操作者の位置から飛ばすための出発点。
+  // 自席（viewYou）の操作は画面下の 2D 手札に対応する卓手前の低い位置から、他家の操作はその席の
+  // 空中手札（floatHandLayout のアンカー相当）から出す。place() の spawnPos に渡すと、山札から沸くのでなく
+  // 「誰の手から出たか」が軌跡で追える（通信対戦でもスナップショット差分で新規カードとして検出される）。
+
+  /** 自席の 2D 手札に対応する卓手前の低い出発点（画面下から立ち上がる飛翔に見える）。 */
+  private selfHandSpot(): THREE.Vector3 {
+    const dir = this.seatDir(this.viewYou);
+    return dir.clone().multiplyScalar(SEAT_R + 0.5).setY(TABLE_TOP_Y + 0.28);
+  }
+
+  /** 他家の空中手札のアンカー（floatHandLayout と同じ席前の高さ）。 */
+  private floatHandSpot(seat: number): THREE.Vector3 {
+    const dir = this.seatDir(seat);
+    return dir.clone().multiplyScalar(SEAT_R + 0.05).setY(TABLE_TOP_Y + 0.98);
+  }
+
+  /** 操作者席に応じた出発点（自席=2D手札位置 / 他家=空中手札）。 */
+  private actorSpot(seat: number): THREE.Vector3 {
+    return seat === this.viewYou ? this.selfHandSpot() : this.floatHandSpot(seat);
+  }
+
   // ---- 状態反映 -----------------------------------------------------------
 
   update(view: PlayerView): void {
@@ -552,6 +612,9 @@ export class TableScene {
       // 自席（viewYou）は「手札帯より上」へ寄せる自席専用レイアウト（控えめバルジ+段数最小化・項目1a）。
       const layout = layoutSeatMelds(this.seatCount, dir.x, inputs, seat === this.viewYou);
       const halfW = (Math.max(CARD_W, CARD_H) / 2) * layout.scale;
+      // 公開/付け札で新規に現れるメルドカードは、所有者席の手（自席=2D手札位置 / 他家=空中手札）から
+      // 飛ばす（契約14項目5）。既存カードの再配置では spawnPos は無視されるため軌跡に影響しない。
+      const meldSpawn = this.actorSpot(seat);
       for (const slot of layout.slots) {
         const card = orderedById.get(slot.meldId)?.[slot.index];
         if (!card) continue;
@@ -563,7 +626,7 @@ export class TableScene {
           .addScaledVector(tangent, slot.v)
           .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.05 + ySeq * 0.006, 0));
         ySeq++;
-        this.place(id, card, p, quat, now, 0, deckPos, slot.meldId, layout.scale);
+        this.place(id, card, p, quat, now, 0, meldSpawn, slot.meldId, layout.scale);
         // ゾーン判定用にメルドの外接矩形（卓面 x/z）を蓄積。カードメッシュへの厳密レイキャストが
         // 縮小カードやリング表示とのズレで外れても、矩形内ドロップなら付け札として拾えるようにする。
         const b = this.meldBounds.get(slot.meldId);
@@ -578,43 +641,23 @@ export class TableScene {
       }
     }
 
-    // 3) 捨て札（面表示・中央やや左）。「何が捨てられたか一目で分かる」ことを最優先に、
-    //    直近 DISCARD_WINDOW 枚を重なり控えめのグリッドで面出しする（項目5）。古い札はアンカーへ
-    //    小さくまとめ（下に潜る）、新しい札ほど手前・上に積む。中央保護ゾーンとメルドゾーンへは
-    //    侵入しない範囲に収める（E8: 大量枚数でも卓外・中央へはみ出さない）。
-    const total = view.discardPile.length;
-    const DISCARD_WINDOW = 15; // 面出しで読める窓（超過分はアンカーへ埋没）
-    const COLS = 5;
-    const DX = 0.3; // 列間隔（部分的に重なり上部の位数字が見える）
-    const DZ = 0.4; // 行間隔
+    // 3) 捨て札（積み上げ表示へ復帰・契約14項目2）。R14 のグリッド面出しは卓を広く占有したため廃止し、
+    //    従来どおり中央やや左のアンカーへコンパクトに積む。「何が/どの順で捨てられたか」は 3D の山を
+    //    タップして出す履歴ポップアップ（app.ts）で読む。ジッタは id ハッシュで決定的（毎フレーム不動）。
+    //    新規（最新）の 1 枚は捨てた席の手から飛ばす（項目5）。既存札の spawnPos は place で無視される。
+    const discarder = view.claimWindow ? view.claimWindow.discarder : this.prevCurSeat;
+    const discardSpawn = discarder >= 0 ? this.actorSpot(discarder) : deckPos;
     view.discardPile.forEach((card, k) => {
       const id = cardId(card);
       desired.add(id);
-      const fromEnd = total - 1 - k; // 0 = 最新
-      let p: THREE.Vector3;
-      let yaw: number;
-      if (fromEnd >= DISCARD_WINDOW) {
-        // 埋没スタック（古い札）: アンカーに小ジッタで積む（読めなくてよい）。
-        const jx = (hashId(id) % 100) / 100 - 0.5;
-        const jz = (((hashId(id) / 7) | 0) % 100) / 100 - 0.5;
-        p = DISCARD_C.clone().add(new THREE.Vector3(jx * 0.16, TABLE_TOP_Y + 0.02 + (k % 6) * 0.006, jz * 0.16));
-        yaw = jx * 0.5;
-      } else {
-        // 面出しグリッド: 古い可視札から順に格子へ並べ、最新を最前面（高い y）に置く。
-        const j = DISCARD_WINDOW - 1 - fromEnd; // 0..WINDOW-1（可視札内で古い順）
-        const col = j % COLS;
-        const rowIdx = Math.floor(j / COLS);
-        p = DISCARD_C.clone().add(
-          new THREE.Vector3(
-            (col - (COLS - 1) / 2) * DX,
-            TABLE_TOP_Y + 0.06 + j * 0.004, // 新しい札ほど僅かに上＝重なり順で最前面
-            (rowIdx - 0.6) * DZ,
-          ),
-        );
-        yaw = 0;
-      }
-      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, yaw, 0, 'YXZ'));
-      this.place(id, card, p, q, now, 0, deckPos);
+      const jx = (hashId(id) % 100) / 100 - 0.5;
+      const jz = (((hashId(id) / 7) | 0) % 100) / 100 - 0.5;
+      // 高さは枚数で伸ばすが上限を設け、山が卓上で暴走しない（E8）。新しい札ほど僅かに上＝最前面。
+      const p = DISCARD_C.clone().add(
+        new THREE.Vector3(jx * 0.14, TABLE_TOP_Y + 0.04 + Math.min(k, 26) * 0.012, jz * 0.14),
+      );
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, jx * 0.6, 0, 'YXZ'));
+      this.place(id, card, p, q, now, 0, discardSpawn);
     });
 
     // 既知カードのうち今回不要になったものを退場アニメ
@@ -631,12 +674,24 @@ export class TableScene {
     this.freshDeal = false;
     this.syncBacks(view, now, dealing, deckPos);
 
+    // ホットシートの手番交代でカメラを新しい操作者=視点席の既定視点へリセットする（契約14項目3）。
+    // youIndex は「今このクライアントが操作している席」。ホットシートは手番ごとに変わり、通信対戦は
+    // 自席固定で不変。前回と変わった＝ホットシートの手番交代とみなし、ユーザーがオービットしていても
+    // 既定視点へ戻す（通信対戦では youIndex 不変のため決して発火せず、自席固定＝現状維持になる）。
+    if (this.prevYouIndex >= 0 && this.prevYouIndex !== view.youIndex) {
+      this.userControlled = false;
+      this.pointers.clear();
+      this.pinchDist = 0;
+      this.tapCand = null;
+    }
+    this.prevYouIndex = view.youIndex;
     // カメラを現手番（=youIndex）席の背後へ演出移動。ただしユーザーが視点を操作中は勝手に戻さない
     // （契約07項目1: リセットはユーザー操作で。ラウンド切替=clearCards で自動的に既定へ復帰する）。
     if (!this.userControlled) this.aimCameraAt(view.youIndex);
     // 手番スポットは「現手番の席」を照らす（通信対戦では youIndex と別席になり得る）
     const curSeat = view.seats.find((s) => s.isCurrent)?.index ?? view.youIndex;
     this.setActiveSeat(curSeat);
+    this.prevCurSeat = curSeat; // 次フレームの捨て札出所推定に使う（項目5）
     this.updateLabels(view); // 席名ビルボード（手番強調はテクスチャ再生成で反映）
     this.wake();
   }
@@ -681,6 +736,7 @@ export class TableScene {
         spawned: false,
         targetScale,
         meldId,
+        spawnPos: spawnPos.clone(),
       };
       this.known.set(id, obj);
     } else {
@@ -886,6 +942,23 @@ export class TableScene {
     return { kind: 'field' };
   }
 
+  /** 捨て札の山の履歴ポップアップを開くタップのハンドラを登録する（契約14項目2・app.ts が実装）。 */
+  setDiscardTapHandler(cb: (() => void) | null): void {
+    this.onDiscardTap = cb;
+  }
+
+  /** クライアント座標が卓上の捨て札の山（DISCARD_C ± DISCARD_R）を指すか。タップ判定に使う（項目2）。 */
+  isDiscardPileAt(clientX: number, clientY: number): boolean {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.camera);
+    const pt = this.raycaster.ray.intersectPlane(this.tablePlane, TMP_HIT);
+    if (!pt) return false;
+    return Math.hypot(pt.x - DISCARD_C.x, pt.z - DISCARD_C.z) < DISCARD_R;
+  }
+
   // ---- 席名ビルボードラベル（契約05項目2） ---------------------------------
 
   private updateLabels(view: PlayerView): void {
@@ -1060,6 +1133,7 @@ export class TableScene {
           removeAt: 0,
           spawned: t.delay === 0 && !t.fromDeck,
           targetScale: 1,
+          spawnPos: spawn.clone(),
         });
       } else {
         obj.targetPos.copy(t.pos);
@@ -1165,6 +1239,36 @@ export class TableScene {
     this.rings.push({ mesh, t: -(opts.delay ?? 0), dur: opts.dur ?? 0.55, r0: opts.r0 ?? 0.2, r1: opts.r1 ?? 2.6, op });
   }
 
+  /**
+   * カメラが回り込んで他家の空中手札（裏面）が視界を塞ぐ間、その手札を隠す（契約14項目4）。
+   * 判定: 卓中心から見たカメラの水平方向 camDir と各席方向 seatDir の内積。内積が大きい席ほど
+   * 「カメラと卓中心の間（＝手前）」にあり、その裏面手札が中央のやり取りを覆う。既定視点（自席の
+   * 背後）では手前席＝自席（空中手札なし）なので他家は隠れない＝リセット直後に誤発火しない（E3）。
+   * ヒステリシス（enter 0.62 / exit 0.46）でしきい値付近のちらつきを防ぐ。自席は元々空中手札なし。
+   */
+  private updateHandOcclusion(): void {
+    const camDir = TMP_A.set(this.camera.position.x, 0, this.camera.position.z);
+    if (camDir.lengthSq() < 1e-6) return;
+    camDir.normalize();
+    for (let seat = 0; seat < this.seatCount; seat++) {
+      if (seat === this.viewYou) {
+        this.blockedSeats.delete(seat);
+        continue;
+      }
+      const dot = this.seatDir(seat).dot(camDir);
+      const was = this.blockedSeats.has(seat);
+      const now = was ? dot > 0.46 : dot > 0.62; // ヒステリシス
+      if (now) this.blockedSeats.add(seat);
+      else this.blockedSeats.delete(seat);
+    }
+    // 席ごとの可視状態を空中手札カード（キー h:<席>:<スロット>）へ反映。山札（d:）は対象外。
+    for (const [key, obj] of this.backById) {
+      if (key.charCodeAt(0) !== 104 /* 'h' */) continue;
+      const seat = parseInt(key.slice(2), 10);
+      obj.group.visible = !this.blockedSeats.has(seat);
+    }
+  }
+
   private aimCameraAt(seatIndex: number): void {
     const dir = this.seatDir(seatIndex);
     const portrait = this.aspect() < 1;
@@ -1209,6 +1313,11 @@ export class TableScene {
       if (this.handDragging) return;
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.pointers.size === 2) this.pinchDist = this.currentPinchDist();
+      // タップ候補を記録（単一ポインタのみ・契約14項目2/E2）。2本目が来たらピンチなのでタップ無効化。
+      this.tapCand =
+        this.pointers.size === 1
+          ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), moved: false }
+          : null;
       el.setPointerCapture?.(e.pointerId);
       e.preventDefault();
     };
@@ -1219,8 +1328,13 @@ export class TableScene {
       const nx = e.clientX;
       const ny = e.clientY;
       this.pointers.set(e.pointerId, { x: nx, y: ny });
+      // タップ候補が閾値を超えて動いたらオービット/スワイプ扱い（タップ不成立・E2）。
+      if (this.tapCand && this.tapCand.id === e.pointerId) {
+        if (Math.hypot(nx - this.tapCand.x, ny - this.tapCand.y) > TAP_MOVE_MAX) this.tapCand.moved = true;
+      }
       if (this.pointers.size >= 2) {
         // ピンチズーム（2本指）: 指間距離の比で半径を増減（E5・タッチ合成で検証）。
+        this.tapCand = null;
         const d = this.currentPinchDist();
         if (this.pinchDist > 0 && d > 0) zoomBy(this.pinchDist / d);
         this.pinchDist = d;
@@ -1233,6 +1347,20 @@ export class TableScene {
     this.onCamPointerUp = (e: PointerEvent): void => {
       if (!this.pointers.has(e.pointerId)) return;
       this.pointers.delete(e.pointerId);
+      // タップ判定（契約14項目2）: 単一ポインタで移動閾値内・短時間・手札D&D中でなく、捨て札の山の上で
+      // 離した場合のみ履歴ポップアップを開く（カメラスワイプ開始/ドロップと誤発火しない・E2）。
+      const tc = this.tapCand;
+      this.tapCand = null;
+      if (
+        tc &&
+        tc.id === e.pointerId &&
+        !tc.moved &&
+        !this.handDragging &&
+        performance.now() - tc.t < TAP_TIME_MAX &&
+        this.isDiscardPileAt(e.clientX, e.clientY)
+      ) {
+        this.onDiscardTap?.();
+      }
       // 2→1 本へ減った時に残指を基準へ取り直し、ピンチ↔オービット遷移のジャンプを防ぐ（E9）。
       this.pinchDist = this.pointers.size === 2 ? this.currentPinchDist() : 0;
       el.releasePointerCapture?.(e.pointerId);
@@ -1283,6 +1411,19 @@ export class TableScene {
       const cx = rect.left + ((p.x + 1) / 2) * rect.width;
       const cy = rect.top + ((1 - p.y) / 2) * rect.height;
       return { client: [Math.round(cx), Math.round(cy)], target: this.dropTargetAt(cx, cy) };
+    };
+    // 検証用（契約14項目5）: 面カード（捨て札/メルド）のスポーン元＝飛翔の出発点を報告する。
+    // 山札位置(0.5,*,0)から出れば「山札から沸く」旧挙動、自席前(低いy)/他家席前(高いy)なら操作者の
+    // 手から出る新挙動。__cameraState/__dropProbe と同じく描画層内で完結する読み取り専用アクセサ。
+    (el as unknown as { __spawnProbe?: (id: string) => unknown }).__spawnProbe = (id) => {
+      const obj = this.known.get(id);
+      if (!obj) return null;
+      return {
+        spawn: (obj.spawnPos.toArray() as number[]).map((n: number) => +n.toFixed(2)),
+        target: (obj.targetPos.toArray() as number[]).map((n: number) => +n.toFixed(2)),
+        current: (obj.group.position.toArray() as number[]).map((n: number) => +n.toFixed(2)),
+        meldId: obj.meldId ?? null,
+      };
     };
   }
 
@@ -1419,6 +1560,8 @@ export class TableScene {
 
     // 席名ラベルの画面内クランプ（カメラのイージングに追従・項目4）
     this.clampLabels();
+    // カメラが手前に回り込んだ他家の空中手札を隠す（契約14項目4）。カメラのイージングに毎フレーム追従。
+    this.updateHandOcclusion();
 
     // 既知カード補間 + 出現ポップ + 退場処理
     for (const [id, obj] of this.known) {
@@ -1556,6 +1699,11 @@ export class TableScene {
     this.userControlled = false;
     this.pointers.clear();
     this.pinchDist = 0;
+    // 手番交代リセット/捨て札出所/遮蔽判定の状態も破棄（前ラウンドの席で誤発火しないように）。
+    this.prevYouIndex = -1;
+    this.prevCurSeat = -1;
+    this.blockedSeats.clear();
+    this.tapCand = null;
     this.wake();
   }
 

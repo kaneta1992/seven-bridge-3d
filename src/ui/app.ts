@@ -111,6 +111,9 @@ export class GameUI {
   private prevMeldIds = new Set<number>();
   private prevCurrentSeat = -1;
   private prevDiscardCount = -1;
+  // 捨て札の履歴（捨てた席index、discardPile と同じ並び）。core は捨てた人を保持しないため UI 層で
+  // 差分追跡する（契約14項目2・view情報で可能な範囲）。ポップアップで席名解決に使う。
+  private discardLog: number[] = [];
   private lastClaimCard: Card | null = null;
   private celebratedRound = -1;
   private celebratedGameOver = false;
@@ -237,6 +240,7 @@ export class GameUI {
     this.prevMeldIds = new Set();
     this.prevCurrentSeat = -1;
     this.prevDiscardCount = -1;
+    this.discardLog = [];
     this.lastClaimCard = null;
     this.celebratedRound = -1;
     this.celebratedGameOver = false;
@@ -419,6 +423,9 @@ export class GameUI {
     this.buildControls(); // 永続ボタン群を一度だけ生成（audio 生成後にミュート状態を反映）
 
     this.scene = new TableScene(this.sceneHost);
+    // 3D 捨て札の山のタップで履歴ポップアップを開く（契約14項目2）。scene がタップ/ドラッグ/スワイプを
+    // 判別して単発タップ時のみ発火する。
+    this.scene.setDiscardTapHandler(() => this.openDiscardHistory());
     this.driver = driver;
     this.unsub = driver.subscribe(() => this.render());
     // 権威者（ホットシート/ホスト）だけが最初のラウンドを配る。ゲストはスナップショットで受け取る。
@@ -525,7 +532,20 @@ export class GameUI {
       this.prevMeldIds = new Set(view.melds.map((m) => m.id));
       this.prevCurrentSeat = curSeat;
       this.prevDiscardCount = view.discardPile.length;
+      this.discardLog = [];
       this.lastClaimCard = null;
+    }
+
+    // 捨て札の履歴（誰が捨てたか）を差分追跡（契約14項目2）。捨てた席は、鳴きウィンドウ中なら
+    // claimWindow.discarder、そうでなければ「前フレームで手番だった席」（＝捨てた直後に手番が進むため）。
+    // ポン/チーで山の最上段が取られると discardPile は縮むので log も末尾を落として整合させる。
+    {
+      const pile = view.discardPile;
+      while (this.discardLog.length > pile.length) this.discardLog.pop();
+      if (this.discardLog.length < pile.length) {
+        const discarder = view.claimWindow ? view.claimWindow.discarder : this.prevCurrentSeat;
+        while (this.discardLog.length < pile.length) this.discardLog.push(discarder);
+      }
     }
 
     // 鳴きウィンドウ中は対象の捨て札を控えておく（新メルドがポン/チーか公開かの判別に使う）
@@ -624,7 +644,8 @@ export class GameUI {
     clear(host);
     // スコア票: 常に最新ビューで開く（openScoreModal を this.currentView() で呼ぶため、HUD を
     // 作り直さなくても表示内容は最新になる）。
-    const scoreBtn = el('button', { text: 'スコア票' });
+    // スコア票はアイコン化（🧮）してモバイル幅でも controls が topbar を圧迫しないようにする（契約14項目6）。
+    const scoreBtn = el('button', { class: 'icon', text: '🧮', title: 'スコア票' });
     scoreBtn.onclick = () => {
       this.audio?.click();
       this.openScoreModal(this.currentView());
@@ -1345,6 +1366,48 @@ export class GameUI {
       el('h2', { text: `ラウンド ${view.round}/${view.totalRounds} 時点` }),
       buildScoreTable(view),
     ]);
+    const close = el('button', { text: '閉じる' });
+    const overlay = el('div', { class: 'center' }, [modal]);
+    close.onclick = () => overlay.remove();
+    modal.append(el('div', { class: 'row' }, [close]));
+    overlay.onclick = (e) => {
+      if (e.target === overlay) overlay.remove();
+    };
+    this.root.append(overlay);
+  }
+
+  // 捨て札の履歴ポップアップ（契約14項目2）。何がどの順で捨てられたかを新しい順に一覧。捨てた席名は
+  // discardLog（UI 層の差分追跡）から解決する（view 情報で可能な範囲）。トグル動作で連打の多重表示を防ぐ。
+  private openDiscardHistory(): void {
+    const existing = this.root.querySelector('.center .modal .discard-list')?.closest('.center');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const view = this.currentView();
+    const pile = view.discardPile;
+    const nameOf = (seat: number): string =>
+      seat >= 0 ? view.seats.find((s) => s.index === seat)?.name ?? '?' : '?';
+    const modal = el('div', { class: 'modal' }, [
+      el('h1', { text: '捨て札の履歴' }),
+      el('h2', { text: `${pile.length} 枚（新しい順）` }),
+    ]);
+    const listEl = el('div', { class: 'discard-list' });
+    if (pile.length === 0) {
+      listEl.append(el('div', { class: 'hint', text: 'まだ捨て札はありません。' }));
+    } else {
+      // 末尾（最新）から先頭（最古）へ。行番号は捨てられた順（1 が最初の捨て札）。
+      for (let k = pile.length - 1; k >= 0; k--) {
+        const seat = this.discardLog[k] ?? -1;
+        const row = el('div', { class: 'drow' }, [
+          el('span', { class: 'dnum', text: `${k + 1}` }),
+          this.chip(pile[k]!),
+          el('span', { class: 'dname', text: nameOf(seat) }),
+        ]);
+        listEl.append(row);
+      }
+    }
+    modal.append(listEl);
     const close = el('button', { text: '閉じる' });
     const overlay = el('div', { class: 'center' }, [modal]);
     close.onclick = () => overlay.remove();
