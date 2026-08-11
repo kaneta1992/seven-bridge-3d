@@ -55,6 +55,9 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 - scene.ts は視覚上の共面回避に y 微差を多用。カード配置をいじるときは distinctY を壊さないこと
 - ドラッグ中の再描画競合: 並び替え実装はドラッグ中の driver 再描画を保留する設計（詳細は app.ts の attachHandPointer 周辺コメント）
 - **ドロップ標的のライフサイクル順序（2026-08-11 実バグ）**: `hideDropTargets()` は attachableMelds を消すため、**必ず resolveDrop() の後に呼ぶ**。先に呼ぶと dropTargetAt のメルド判定が全て素通りし「場=公開」へ化ける（ホバーの判定円は光るのにドロップだけ失敗する紛らわしい症状になる）。付け札D&Dを触ったら必ず「実ポインタ経路」（pointerdown→move→up の合成イベント＋__dropProbe グリッド）で検証すること — resolveDrop 直接呼び出しの検証はこのクラスのバグを素通しする
+- **prefers-reduced-motion の罠（2026-08-12 実バグ）**: このPC（ユーザー環境）は Windows「アニメーション効果」OFFで `prefers-reduced-motion: reduce` が立つ。reduced ゲートに入れた演出は**ユーザーの実機で一切見えなくなる**（ハートエフェクト不表示の真因）。ユーザーが明示要望した演出は reduced ゲートに入れないこと。quality.cameraShake=!reduced なのでシェイク系も同様に注意
+- **__plushProbe/__cameraState はタイトルデモのシーンを掴むことがある**: タイトル画面中はデモ用 TableScene（cinematic=true・dt≈0.033の32fpsスロットル）が生きており、`document.querySelectorAll` で最初に見つかる canvas がそれ。ゲーム側の検証は「`/ラウンド \d/` が HUD にあり TAP TO START が無い」ことを確認してからプローブを取得する。cinematic=true では注視判定は常に false（gazeT が進まない）
+- **スクリーンショットは粒子検証に使えない**: ツール往復ラグ（約2秒）で寿命1〜2秒の粒子は写らない。`__plushProbe('state').particles`（プール生存数）とシェーダ数式のピクセルシミュレーション（ASCII化）で数値検証する
 
 ## 通信UX（R9以降）
 - `src/net/lobbyChannel.ts`: 公開ルーム一覧（固定ロビーチャネル LOBBY_ROOM への定期広告・受信側TTL・送受信両側 sanitizeRoomAd で {code,hostName,count,rounds} 以外を遮断）
