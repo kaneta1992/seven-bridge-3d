@@ -13,6 +13,7 @@ import { disposeFelt, feltTexture } from './felt';
 import { buildPlushDolls, disposePlushTextures } from './plush';
 import { PlushReactions } from './plushReaction';
 import { HIDE_SPOTS, hashSeed, type HideSpot } from './hideSpots';
+import { makeFloorWood, makeWallPaper, makeCeilingWood, makeRugPattern } from './roomTextures';
 import { shuffle } from '../core';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
@@ -218,6 +219,9 @@ export class TableScene {
   private plushSrc: { panda?: THREE.Object3D; dalmatian?: THREE.Object3D } = {};
   private hideSeed: string | null = null;
   private hiddenPlush: THREE.Object3D[] = [];
+  // 契約27(R29): 躯体/ラグの Canvas テクスチャとラグメッシュ（dispose 対象）
+  private roomTextures: THREE.Texture[] = [];
+  private rugMesh: THREE.Mesh | null = null;
   /** かくれんぼ発見通知（初回注視リアクション時に一度だけ・app がコールアウト/SFXへ接続）。 */
   onHiddenFound: ((kind: 'dalmatian' | 'panda') => void) | null = null;
   // ぬいぐるみ「見つめると反応する」リアクション（契約24）。注視+ズーム検知→両体の transform 演出。
@@ -489,12 +493,16 @@ export class TableScene {
     const floorY = -0.5;
     const wallZ = S / 2; // 壁の内面座標
     // BoxGeometry の面順: +x, -x, +y(天井), -y(床), +z, -z。面ごとに材質を割り当てる。
-    const wall = (color: string): THREE.MeshStandardMaterial =>
-      new THREE.MeshStandardMaterial({ color, roughness: 0.96, metalness: 0, side: THREE.BackSide });
-    const wallMat = wall('#7a6249'); // 壁: 暖色の塗り壁（明るい家の居間・契約14項目1）
-    const ceilMat = wall('#4a3a2a'); // 天井: 壁より一段暗い暖色
-    const floorMat = new THREE.MeshStandardMaterial({ color: '#5a4530', roughness: 0.98, side: THREE.BackSide }); // 床板
-    const mats = [wallMat, wallMat.clone(), ceilMat, floorMat, wallMat.clone(), wallMat.clone()];
+    // 契約27(R29): 躯体を単色→プロシージャルテクスチャへ（木目フローリング・壁紙+腰壁・板張り天井）。
+    // 従来と同じ暖色パレットで描いているため照明・フォグ・カード視認性は据え置き。
+    const floorTex = makeFloorWood();
+    const wallTex = makeWallPaper();
+    const ceilTex = makeCeilingWood();
+    this.roomTextures.push(floorTex, wallTex, ceilTex);
+    const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, roughness: 0.96, metalness: 0, side: THREE.BackSide });
+    const ceilMat = new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 0.97, metalness: 0, side: THREE.BackSide });
+    const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.93, metalness: 0, side: THREE.BackSide });
+    const mats = [wallMat, wallMat, ceilMat, floorMat, wallMat, wallMat];
     const room = new THREE.Mesh(new THREE.BoxGeometry(S, H, S), mats);
     room.position.set(0, floorY + H / 2, 0);
     room.receiveShadow = false; // 内壁は影計算に含めない（コスト削減・見た目に不要）
@@ -564,10 +572,17 @@ export class TableScene {
     const woodDark = '#3f2c1a';
     const woodMid = '#6b4a2c';
 
-    // ラグ（卓の下・床の上）: 薄い円盤 + 二重の縁取りリング。フェルト卓の緑と調和する臙脂。
-    bake(opaque, new THREE.CircleGeometry(5.2, 40), '#5b2f2c', 1, 1, 1, 0, floorY + 0.02, 0, -Math.PI / 2);
-    bake(opaque, new THREE.RingGeometry(4.5, 5.0, 40), '#7a4a3a', 1, 1, 1, 0, floorY + 0.03, 0, -Math.PI / 2);
-    bake(opaque, new THREE.RingGeometry(3.7, 3.85, 40), '#6e4436', 1, 1, 1, 0, floorY + 0.03, 0, -Math.PI / 2);
+    // ラグ（契約27）: オリエンタル風パターンのテクスチャ円盤（従来の単色円盤+2リングを置換・+1描画コール）。
+    const rugTex = makeRugPattern();
+    this.roomTextures.push(rugTex);
+    this.rugMesh = new THREE.Mesh(
+      new THREE.CircleGeometry(5.2, 48),
+      new THREE.MeshStandardMaterial({ map: rugTex, roughness: 0.95, metalness: 0 }),
+    );
+    this.rugMesh.rotation.x = -Math.PI / 2;
+    this.rugMesh.position.y = floorY + 0.02;
+    this.rugMesh.receiveShadow = false;
+    this.scene.add(this.rugMesh);
 
     // 窓（-z 壁）+ 十字桟 + 左右カーテン。発光パネルは glow バケット（Bloom 非対象・レイヤ0）。
     const winW = 5.0;
@@ -2846,6 +2861,15 @@ export class TableScene {
     for (const o of this.hiddenPlush) this.scene.remove(o);
     this.hiddenPlush = [];
     this.plushSrc = {};
+    // 躯体/ラグの Canvas テクスチャとラグメッシュ（契約27・E3）
+    for (const t of this.roomTextures) t.dispose?.();
+    this.roomTextures = [];
+    if (this.rugMesh) {
+      this.rugMesh.geometry?.dispose?.();
+      (this.rugMesh.material as THREE.Material).dispose?.();
+      this.scene.remove(this.rugMesh);
+      this.rugMesh = null;
+    }
     // GLB 未ロードのまま破棄される場合に備え、swap 家具（クローンマテリアル）も明示解放（契約25）
     for (const mesh of this.swapFurniture) {
       mesh.geometry?.dispose?.();

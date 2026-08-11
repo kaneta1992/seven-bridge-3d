@@ -37,6 +37,7 @@ declare module 'three' {
   export const FrontSide: AnyX;
   export const EquirectangularReflectionMapping: AnyX;
   export const RepeatWrapping: AnyX;
+  export const ClampToEdgeWrapping: AnyX;
 }
 
 declare module 'three/examples/jsm/postprocessing/EffectComposer.js' {

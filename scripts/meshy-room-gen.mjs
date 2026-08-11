@@ -26,6 +26,21 @@ const ITEMS = [
   { name: 'basket', poly: 5000, prompt: 'round woven rattan storage basket with a folded cream blanket draped over the rim' },
   { name: 'pouf', poly: 3000, prompt: 'round knitted pouf ottoman, mustard yellow chunky knit fabric' },
   { name: 'wallshelf', poly: 6000, prompt: 'wooden wall-mounted floating shelf decorated with two small potted plants and a short row of books' },
+  // ---- 第2弾（R29・契約27: 高密度化）。state.json 済みの既存分は自動スキップされる ----
+  { name: 'fireplace', poly: 10000, prompt: 'brick fireplace with wooden mantel shelf, stacked firewood logs inside, candles on the mantel, cozy warm living room style' },
+  { name: 'loveseat', poly: 9000, prompt: 'cozy 2-seat loveseat sofa, warm terracotta orange fabric, plush cushions, low wooden legs' },
+  { name: 'laddershelf', poly: 9000, prompt: 'wooden leaning ladder shelf with five tiers, decorated with small potted plants, books and woven baskets' },
+  { name: 'barcart', poly: 7000, prompt: 'vintage brass and wood bar cart on wheels, bottles and glasses on two shelves' },
+  { name: 'recordconsole', poly: 8000, prompt: 'mid-century record player console, walnut wood cabinet, turntable on top, vinyl records leaning beside it' },
+  { name: 'globe', poly: 5000, prompt: 'antique world globe on a wooden floor stand' },
+  { name: 'coatrack', poly: 5000, prompt: 'wooden coat stand rack with a hat and two scarves hanging on it' },
+  { name: 'dogbed', poly: 4000, prompt: 'round cozy pet dog bed cushion, beige quilted fabric with a small blanket' },
+  { name: 'toybox', poly: 6000, prompt: 'wooden toy chest with open lid, colorful toy blocks and a ball inside' },
+  { name: 'cushions', poly: 4000, prompt: 'two round floor cushions stacked, boho patterned fabric, warm colors' },
+  { name: 'mirror', poly: 4000, prompt: 'full length leaning floor mirror with warm wooden frame' },
+  { name: 'chandelier', poly: 6000, prompt: 'rustic round wooden chandelier with warm candle style lights and a hanging chain' },
+  { name: 'hangplant', poly: 6000, prompt: 'hanging plant with trailing ivy leaves in a macrame rope planter' },
+  { name: 'suitcases', poly: 5000, prompt: 'stack of three vintage leather suitcases, warm brown tones' },
 ];
 
 mkdirSync(OUT, { recursive: true });

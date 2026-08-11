@@ -110,19 +110,17 @@ for (const name of Object.keys(MODELS)) {
   console.log(`${name}: tris=${triCount} bbox=${sz} texs=${texs.size}`);
 }
 
-// ---- 2) アトラスのタイル割り当て（テクスチャ単位・モデル間共有なし） ----
-const tileOf = new Map(); // texKey -> tileIndex
+// ---- 2) アトラスのタイル割り当て（テクスチャ単位・16タイル/枚を超えたら複数アトラス） ----
+// アトラス1枚 = 1プリミティブ = 1描画コール。第2弾（R29）で26テクスチャ → 2アトラス=2コール。
+const PER_ATLAS = GRID * GRID;
+const tileOf = new Map(); // texKey -> グローバルタイル番号（atlas = floor(n/16), tile = n%16）
 let nextTile = 0;
-for (const [name, m] of models)
-  for (const key of m.texs.keys()) {
-    if (nextTile >= GRID * GRID) throw new Error(`タイル不足: ${name} ${key}`);
-    tileOf.set(key, nextTile++);
-  }
-console.log(`アトラス: ${nextTile} タイル使用 / ${GRID * GRID}`);
+for (const [, m] of models) for (const key of m.texs.keys()) tileOf.set(key, nextTile++);
+const N_ATLAS = Math.ceil(nextTile / PER_ATLAS);
+console.log(`アトラス: ${nextTile} タイル / ${N_ATLAS} 枚（=${N_ATLAS} 描画コール）`);
 
-// ---- 3) インスタンス焼き込み: スケール→yaw→平行移動、UV 再マップ、配列連結 ----
-const P = [], N = [], UV = [], I = [];
-let vBase = 0;
+// ---- 3) インスタンス焼き込み: スケール→yaw→平行移動、UV 再マップ、アトラス毎に配列連結 ----
+const buckets = Array.from({ length: N_ATLAS }, () => ({ P: [], N: [], UV: [], I: [], vBase: 0 }));
 const report = [];
 for (const inst of INSTANCES) {
   const m = models.get(inst.model);
@@ -135,18 +133,21 @@ for (const inst of INSTANCES) {
   const cz = (m.bb.min[2] + m.bb.max[2]) / 2;
   const y0 = m.bb.min[1];
   const yaw = deg(inst.yaw);
-  const ty = FLOOR_Y + (inst.yOff ?? 0);
+  // topY: バウンディング上面を指定高さへ（天井/梁から吊る家具）。それ以外は床+yOff に接地。
+  const ty = inst.topY !== undefined ? inst.topY - bh * sy : FLOOR_Y + (inst.yOff ?? 0);
   const wb = { min: [1e9, 1e9, 1e9], max: [-1e9, -1e9, -1e9] };
   for (const p of m.parts) {
     const tile = tileOf.get(p.texKey);
-    const tc = tile % GRID;
-    const tr = Math.floor(tile / GRID);
+    const B = buckets[Math.floor(tile / PER_ATLAS)];
+    const t16 = tile % PER_ATLAS;
+    const tc = t16 % GRID;
+    const tr = Math.floor(t16 / GRID);
     const n = p.pos.length / 3;
     for (let i = 0; i < n; i++) {
       let [x, y, z] = [(p.pos[i * 3] - cx) * sx, (p.pos[i * 3 + 1] - y0) * sy, (p.pos[i * 3 + 2] - cz) * sz];
       [x, y, z] = rotY(yaw, x, y, z);
       x += inst.x; y += ty; z += inst.z;
-      P.push(x, y, z);
+      B.P.push(x, y, z);
       for (let k = 0; k < 3; k++) {
         wb.min[k] = Math.min(wb.min[k], [x, y, z][k]);
         wb.max[k] = Math.max(wb.max[k], [x, y, z][k]);
@@ -155,48 +156,60 @@ for (const inst of INSTANCES) {
       let [nx, ny, nz] = [p.nrm[i * 3] / sx, p.nrm[i * 3 + 1] / sy, p.nrm[i * 3 + 2] / sz];
       const nl = Math.hypot(nx, ny, nz) || 1;
       [nx, ny, nz] = rotY(yaw, nx / nl, ny / nl, nz / nl);
-      N.push(nx, ny, nz);
+      B.N.push(nx, ny, nz);
       const u = Math.min(1, Math.max(0, p.uv[i * 2]));
       const v = Math.min(1, Math.max(0, p.uv[i * 2 + 1]));
-      UV.push((u * (1 - 2 * PAD) + PAD + tc) / GRID, (v * (1 - 2 * PAD) + PAD + tr) / GRID);
+      B.UV.push((u * (1 - 2 * PAD) + PAD + tc) / GRID, (v * (1 - 2 * PAD) + PAD + tr) / GRID);
     }
-    for (const ix of p.idx) I.push(ix + vBase);
-    vBase += n;
+    for (const ix of p.idx) B.I.push(ix + B.vBase);
+    B.vBase += n;
   }
   report.push({ model: inst.model, x: inst.x, z: inst.z, yaw: inst.yaw, scale: [sx, sy, sz].map((v) => +v.toFixed(3)), bbox: { min: wb.min.map((v) => +v.toFixed(2)), max: wb.max.map((v) => +v.toFixed(2)) } });
 }
-console.log(`統合: verts=${vBase} tris=${I.length / 3} instances=${INSTANCES.length}`);
+const totV = buckets.reduce((a, b) => a + b.vBase, 0);
+console.log(`統合: verts=${totV} tris=${buckets.reduce((a, b) => a + b.I.length, 0) / 3} instances=${INSTANCES.length}`);
 
 // ---- 4) アトラス合成（sharp）: テクスチャは 1024 タイルへリサイズ、単色はベタ塗り ----
-const comps = [];
+const atlasComps = Array.from({ length: N_ATLAS }, () => []);
 for (const [, m] of models)
   for (const [key, t] of m.texs) {
     const tile = tileOf.get(key);
-    const left = (tile % GRID) * TILE;
-    const top = Math.floor(tile / GRID) * TILE;
+    const t16 = tile % PER_ATLAS;
+    const left = (t16 % GRID) * TILE;
+    const top = Math.floor(t16 / GRID) * TILE;
     const input = t.img
       ? await sharp(t.img).resize(TILE, TILE, { fit: 'fill' }).removeAlpha().png().toBuffer()
       : await sharp({ create: { width: TILE, height: TILE, channels: 3, background: { r: t.rgb[0], g: t.rgb[1], b: t.rgb[2] } } }).png().toBuffer();
-    comps.push({ input, left, top });
+    atlasComps[Math.floor(tile / PER_ATLAS)].push({ input, left, top });
   }
-const atlas = await sharp({ create: { width: ATLAS, height: ATLAS, channels: 3, background: { r: 120, g: 110, b: 100 } } })
-  .composite(comps).jpeg({ quality: 82 }).toBuffer();
-console.log(`アトラス JPEG: ${(atlas.length / 1024 / 1024).toFixed(2)} MB`);
+const atlases = [];
+for (let a = 0; a < N_ATLAS; a++) {
+  const buf = await sharp({ create: { width: ATLAS, height: ATLAS, channels: 3, background: { r: 120, g: 110, b: 100 } } })
+    .composite(atlasComps[a]).jpeg({ quality: 82 }).toBuffer();
+  atlases.push(buf);
+  console.log(`アトラス${a}: ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
+}
 
-// ---- 5) 出力 GLB 構築（1 mesh / 1 primitive / 1 material） ----
+// ---- 5) 出力 GLB 構築（1 mesh / アトラス毎に 1 primitive+1 material） ----
 const out = new Document();
 const buffer = out.createBuffer();
 const acc = (type, arr) => out.createAccessor().setType(type).setArray(arr).setBuffer(buffer);
-const tex = out.createTexture('roomAtlas').setImage(atlas).setMimeType('image/jpeg');
-const material = out.createMaterial('roomFurniture')
-  .setBaseColorTexture(tex).setMetallicFactor(0).setRoughnessFactor(0.95).setDoubleSided(true);
-const prim = out.createPrimitive()
-  .setAttribute('POSITION', acc('VEC3', new Float32Array(P)))
-  .setAttribute('NORMAL', acc('VEC3', new Float32Array(N)))
-  .setAttribute('TEXCOORD_0', acc('VEC2', new Float32Array(UV)))
-  .setIndices(out.createAccessor().setType('SCALAR').setArray(new Uint32Array(I)).setBuffer(buffer))
-  .setMaterial(material);
-const mesh = out.createMesh('roomFurniture').addPrimitive(prim);
+const mesh = out.createMesh('roomFurniture');
+for (let a = 0; a < N_ATLAS; a++) {
+  const B = buckets[a];
+  if (!B.vBase) continue;
+  const tex = out.createTexture(`roomAtlas${a}`).setImage(atlases[a]).setMimeType('image/jpeg');
+  const material = out.createMaterial(`roomFurniture${a}`)
+    .setBaseColorTexture(tex).setMetallicFactor(0).setRoughnessFactor(0.95).setDoubleSided(true);
+  mesh.addPrimitive(
+    out.createPrimitive()
+      .setAttribute('POSITION', acc('VEC3', new Float32Array(B.P)))
+      .setAttribute('NORMAL', acc('VEC3', new Float32Array(B.N)))
+      .setAttribute('TEXCOORD_0', acc('VEC2', new Float32Array(B.UV)))
+      .setIndices(out.createAccessor().setType('SCALAR').setArray(new Uint32Array(B.I)).setBuffer(buffer))
+      .setMaterial(material),
+  );
+}
 out.createScene('room').addChild(out.createNode('roomFurniture').setMesh(mesh));
 await out.transform(quantize({ quantizePosition: 14, quantizeNormal: 10, quantizeTexcoord: 12 }));
 await io.write(OUT, out);
