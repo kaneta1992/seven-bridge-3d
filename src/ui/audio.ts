@@ -211,4 +211,21 @@ export class AudioKit {
     this.tone(784, 0.16, 'sine', 0.12, 0.07);
     this.noise(0.12, 0.12, 1400, 0, 0.7);
   }
+
+  /** ぬいぐるみが手を振る挨拶音（契約24・可愛い上行3音＋きらめき）。 */
+  plushWave(): void {
+    const notes = [659, 880, 1175]; // E5→A5→D6 の明るい挨拶
+    notes.forEach((f, i) => this.tone(f, 0.16, 'triangle', 0.13, i * 0.08));
+    this.tone(1568, 0.12, 'sine', 0.08, 0.24); // 尾のきらめき
+    this.noise(0.06, 0.08, 5200, 0.02, 1.6);
+  }
+
+  /** ぬいぐるみがぴょんと跳ねる音（契約24・弾む2連 boing）。 */
+  plushBounce(): void {
+    // 1跳ね目/2跳ね目: 低→高へしゃくり上げる弾性音（square のグライド）。
+    this.tone(320, 0.16, 'square', 0.14, 0, 520);
+    this.tone(360, 0.16, 'square', 0.13, 0.5, 620);
+    this.tone(760, 0.1, 'sine', 0.07, 0.02); // 上の艶
+    this.tone(860, 0.1, 'sine', 0.07, 0.52);
+  }
 }

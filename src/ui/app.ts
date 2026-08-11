@@ -615,6 +615,11 @@ export class GameUI {
     // 3D 捨て札の山のタップで履歴ポップアップを開く（契約14項目2）。scene がタップ/ドラッグ/スワイプを
     // 判別して単発タップ時のみ発火する。
     this.scene.setDiscardTapHandler(() => this.openDiscardHistory());
+    // ぬいぐるみリアクションの効果音（契約24・可愛い挨拶音 / 弾む音）。scene は音を持たないので UI から接続。
+    this.scene.onPlushReaction = (kind) => {
+      if (kind === 'wave') this.audio?.plushWave();
+      else this.audio?.plushBounce();
+    };
     this.driver = driver;
     this.unsub = driver.subscribe(() => this.render());
     // 権威者（ホットシート/ホスト）だけが最初のラウンドを配る。ゲストはスナップショットで受け取る。

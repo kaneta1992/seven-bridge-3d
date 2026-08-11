@@ -262,6 +262,38 @@ export class ParticleSystem {
     }
   }
 
+  /**
+   * ぬいぐるみリアクションの小さなハート粒子（契約24）。頭上からふわっと立ち昇る桃色/白の光点。
+   * 加算合成のスパークプールを流用（丸い柔らかな光＝キラキラのハート表現）。上向き・低重力でゆっくり漂う。
+   */
+  hearts(pos: THREE.Vector3, count = 14): void {
+    const palette: [number, number, number][] = [
+      [1.0, 0.45, 0.62], // 桃
+      [1.0, 0.72, 0.82], // 淡桃
+      [1.0, 0.95, 0.98], // 白ピンク
+    ];
+    for (let k = 0; k < count; k++) {
+      const c = palette[(Math.random() * palette.length) | 0]!;
+      const theta = Math.random() * Math.PI * 2;
+      const rad = Math.random() * 0.14;
+      this.sparks.emit(
+        pos.x + Math.cos(theta) * rad,
+        pos.y,
+        pos.z + Math.sin(theta) * rad,
+        (Math.random() - 0.5) * 0.5,
+        0.9 + Math.random() * 0.7, // 上へふわり
+        (Math.random() - 0.5) * 0.5,
+        c[0]!,
+        c[1]!,
+        c[2]!,
+        0.07 + Math.random() * 0.05,
+        0.9 + Math.random() * 0.6,
+        -0.35, // 負の重力＝ゆるく上昇し続ける
+        1.6,
+      );
+    }
+  }
+
   /** 通常合成の紙吹雪噴水（上がり・ラウンド終了のセレブレーション）。 */
   confettiFountain(origin: THREE.Vector3, count: number): void {
     const palette: [number, number, number][] = [

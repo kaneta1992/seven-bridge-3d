@@ -11,6 +11,7 @@ import { cardId } from '../core';
 import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
 import { disposeFelt, feltTexture } from './felt';
 import { buildPlushDolls, disposePlushTextures } from './plush';
+import { PlushReactions } from './plushReaction';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
@@ -207,6 +208,10 @@ export class TableScene {
   private meldBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number }>();
   // Meshy生成のぬいぐるみGLB（読み込めた場合のみ・dispose対象。契約24）
   private plushGlbs: THREE.Object3D[] = [];
+  // ぬいぐるみ「見つめると反応する」リアクション（契約24）。注視+ズーム検知→両体の transform 演出。
+  private plushReactions: PlushReactions | null = null;
+  // リアクションの効果音トリガ（app.ts が AudioKit へ接続する・src/render は音を持たない）。
+  onPlushReaction: ((kind: 'wave' | 'bounce') => void) | null = null;
   private handDragging = false; // 手札 D&D 中はカメラ操作を無視する（項目10）。
 
   // ホットシートの手番交代でカメラを自席へリセット（契約14項目3）。youIndex は「操作者＝視点席」で、
@@ -750,16 +755,20 @@ export class TableScene {
   private loadPlushGlbs(proceduralGroup: THREE.Object3D, seatTopY: number, seatCenterX: number, zCenter: number): void {
     const loader = new GLTFLoader();
     const base = (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? './';
-    const targetHeight = 1.4; // プロシージャル版と同じ座高感
-    const place = (obj: THREE.Object3D, z: number): void => {
+    // 「見つめると反応する」リアクション（契約24）。両体ともボーンレスの transform 演出。
+    this.plushReactions = new PlushReactions(this.particles);
+    this.plushReactions.onSfx = (k) => this.onPlushReaction?.(k);
+    const targetHeight = 1.05; // 座高（契約24調整: 従来1.4の0.75倍）
+    const place = (obj: THREE.Object3D, z: number, kind: 'dalmatian' | 'panda'): void => {
       const box = new THREE.Box3().setFromObject(obj);
       const size = new THREE.Vector3();
       box.getSize(size);
       const s = targetHeight / Math.max(size.y, 0.001);
       obj.scale.setScalar(s);
       box.setFromObject(obj);
-      // 接地: バウンディング底面を座面に合わせ、背もたれ側へ少し寄せる
-      obj.position.set(seatCenterX - 0.1 - (box.min.x + box.max.x) / 2 + obj.position.x, seatTopY - box.min.y + obj.position.y, z - (box.min.z + box.max.z) / 2 + obj.position.z);
+      // 接地: バウンディング底面を座面へ。背クッション（sofaX+0.2）より前へ出し、少し上げて埋もれ回避
+      // （契約24調整: 従来は背もたれ側 -0.1 で背クッションに埋もれていた）。
+      obj.position.set(seatCenterX + 0.55 - (box.min.x + box.max.x) / 2 + obj.position.x, seatTopY + 0.1 - box.min.y + obj.position.y, z - (box.min.z + box.max.z) / 2 + obj.position.z);
       obj.rotation.y = Math.PI / 2; // 部屋中央（+X方向）を向く
       obj.traverse((o: THREE.Object3D) => {
         o.castShadow = false;
@@ -768,6 +777,7 @@ export class TableScene {
       });
       this.scene.add(obj);
       this.plushGlbs.push(obj);
+      this.plushReactions?.register(kind, obj); // リアクション対象として登録（契約24）
     };
     // 最初の1体が読めた時点でプロシージャル版を非表示（重なり防止）。両方失敗ならそのまま残る。
     const hideProcedural = (): void => {
@@ -777,7 +787,7 @@ export class TableScene {
       `${base}models/panda.glb`,
       (gltf) => {
         hideProcedural();
-        place(gltf.scene, zCenter + 0.45);
+        place(gltf.scene, zCenter + 0.45, 'panda');
       },
       undefined,
       () => undefined,
@@ -786,7 +796,7 @@ export class TableScene {
       `${base}models/dalmatian.glb`,
       (gltf) => {
         hideProcedural();
-        place(gltf.scene, zCenter - 0.45);
+        place(gltf.scene, zCenter - 0.45, 'dalmatian');
       },
       undefined,
       () => undefined,
@@ -2184,6 +2194,48 @@ export class TableScene {
         meldId: obj.meldId ?? null,
       };
     };
+    // 検証用（契約24）: ぬいぐるみリアクションの注視+ズーム検知を DOM/JS で駆動・観測する。
+    // 'state'=現状態、'stare'=個体頭部を寄って見つめる（fov指定）、'away'=既定俯瞰へ視線を外す。
+    // カメラの camPos/camPosGoal/camTarget/fov を直接据えて（userControlled で自動再照準を抑止し）
+    // ループを起こす＝注視が実際に成立し、デバウンス/クールダウン/演出→復帰が実機同様に進む。
+    (el as unknown as { __plushProbe?: (cmd: string, kind?: string, fov?: number) => unknown }).__plushProbe = (cmd, kind, fov) => {
+      const pr = this.plushReactions;
+      if (!pr) return { ready: false };
+      if (cmd === 'state') return pr.debugState();
+      if (cmd === 'stare') {
+        const head = pr.debugHead((kind ?? 'dalmatian') as 'dalmatian' | 'panda');
+        if (!head) return { ok: false, reason: 'not-registered' };
+        this.userControlled = true;
+        const eye = TMP_A.set(head.x + 4.0, head.y + 0.2, head.z); // ソファ手前（+X＝部屋中央側）から寄る
+        this.camPosGoal.copy(eye);
+        this.camPos.copy(eye);
+        this.camTargetGoal.copy(head);
+        this.camTarget.copy(head);
+        this.lookFov = fov ?? 34;
+        this.camera.fov = this.lookFov;
+        this.camera.position.copy(eye);
+        this.camera.lookAt(head);
+        this.camera.updateProjectionMatrix();
+        this.wake();
+        return { ok: true, eye: (eye.toArray() as number[]).map((n) => +n.toFixed(2)), fov: this.lookFov };
+      }
+      if (cmd === 'away') {
+        this.userControlled = true;
+        const eye = TMP_A.set(0, 4, 6);
+        this.camPosGoal.copy(eye);
+        this.camPos.copy(eye);
+        this.camTargetGoal.set(0, 0, 0);
+        this.camTarget.set(0, 0, 0);
+        this.lookFov = 46;
+        this.camera.fov = 46;
+        this.camera.position.copy(eye);
+        this.camera.lookAt(this.camTarget);
+        this.camera.updateProjectionMatrix();
+        this.wake();
+        return { ok: true };
+      }
+      return { ok: false, reason: 'unknown-cmd' };
+    };
     // 計測用（契約20項目4）: 静的家具の1メッシュ統合による描画コール削減の before/after を測る。
     // 呼び出し時にシーンを1回強制描画してから renderer.info.render を読む（hidden ペインで rAF が
     // 止まっていても確定値が取れる）。postfx を経ないシーン素描画のコール数＝統合効果が素直に出る。
@@ -2417,6 +2469,12 @@ export class TableScene {
     // パーティクル
     if (this.particles.update(dt)) fxBusy = true;
 
+    // ぬいぐるみ「見つめると反応する」リアクション（契約24）: 注視+ズーム検知→両体の transform 演出。
+    // busy（デバウンス中/演出中）は idle 停止を抑止する。reduced-motion は quality.cameraShake=false と一致。
+    if (this.plushReactions?.update(dt, this.camera, this.camTarget, this.cinematic, !this.quality.cameraShake)) {
+      fxBusy = true;
+    }
+
     // 手番の光だまり（契約17項目2）: spotTarget（現手番席の前）に追従し、ゆるく脈動する金色の床グロー
     // ＋細い金環。自席の手番ではほぼ非表示まで落とす（自分の番は 2D 手札・手番バナーで示す）。
     // 表示/非表示はフェードで切替え、手番交代で「白い円」がパッと出入りしないようにする。
@@ -2599,6 +2657,8 @@ export class TableScene {
     disposeCardTextures();
     disposeFelt();
     disposePlushTextures(); // ぬいぐるみの斑点 Canvas テクスチャ（map は traverse では解放されない・E3）
+    this.plushReactions?.dispose(); // wave GLB / ミキサー / 状態を解放（契約24・E3/E5）
+    this.plushReactions = null;
     // Meshy GLB のジオメトリ・マテリアル・テクスチャを明示解放（契約24）
     for (const obj of this.plushGlbs) {
       obj.traverse((o: THREE.Object3D) => {
