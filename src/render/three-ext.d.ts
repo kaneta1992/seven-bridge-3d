@@ -16,6 +16,8 @@ declare module 'three' {
   export class RingGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class BoxGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class ConeGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class SphereGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class CapsuleGeometry { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Plane { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Sprite { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class SpriteMaterial { [k: string]: AnyX; constructor(...a: AnyX[]); }

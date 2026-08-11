@@ -9,6 +9,7 @@ import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
 import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
 import { disposeFelt, feltTexture } from './felt';
+import { buildPlushDolls, disposePlushTextures } from './plush';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
 import { ParticleSystem } from './particles';
@@ -727,6 +728,13 @@ export class TableScene {
       floorLamp.position.set(flX, floorY + 2.4, flZ);
       this.scene.add(floorLamp);
     }
+
+    // ユーザーのぬいぐるみ2体（契約23）: ソファ座面の上に肩が触れる距離で並べて座らせる。
+    // 座面上面 = floorY + 0.7（座面 box: 中心 floorY+0.35・高さ0.7）。中心 X = sofaX（= -wallZ + 1.0）。
+    // Z 中心はソファ中央(z=2)付近。全パーツは既定レイヤ(0)・cast/receive shadow=false ＝ Bloom非対象(E2)で
+    // 部屋の光に馴染む。統合済みで +2 描画コールのみ（drawCalls は getRenderStats の calls に含まれる）。
+    const plush = buildPlushDolls(floorY + 0.7, -wallZ + 1.0, 2.0);
+    this.scene.add(plush.group);
   }
 
   // ---- カードメッシュ生成（共有ジオメトリ/マテリアル） --------------------
@@ -2534,6 +2542,7 @@ export class TableScene {
     // モジュールキャッシュのテクスチャを破棄しクリア（次シーンで再生成される）
     disposeCardTextures();
     disposeFelt();
+    disposePlushTextures(); // ぬいぐるみの斑点 Canvas テクスチャ（map は traverse では解放されない・E3）
 
     this.known.clear();
     this.backById.clear();
