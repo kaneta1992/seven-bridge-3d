@@ -15,6 +15,8 @@ export interface HostDriverDeps {
   selfPk: string;
   totalRounds: number;
   seed?: number;
+  /** NPC（ボット）が担当する席 id（契約16）。applyBot はこの席のみ権威適用する。 */
+  npcIds?: string[];
   /** playerKey → 現在の生 peerId（未接続/自分は null）。セッションが束縛を維持する（E8）。 */
   resolvePeer: (pk: string) => string | null;
   /** peerId → playerKey（未知は null）。なりすまし検証に使う（E7）。 */
@@ -32,6 +34,7 @@ export class HostDriver implements GameDriver {
   readonly totalRounds: number;
   private readonly selfPk: string;
   private readonly deps: HostDriverDeps;
+  private readonly npcIds: Set<string>;
   private state: GameState;
   private listeners = new Set<() => void>();
   private seq = 0;
@@ -40,6 +43,7 @@ export class HostDriver implements GameDriver {
   constructor(deps: HostDriverDeps) {
     this.deps = deps;
     this.selfPk = deps.selfPk;
+    this.npcIds = new Set(deps.npcIds ?? []);
     this.players = deps.players.map((p) => ({ id: p.id, name: p.name }));
     this.state = createGame({
       players: deps.players,
@@ -93,6 +97,27 @@ export class HostDriver implements GameDriver {
 
   isAuthority(): boolean {
     return true;
+  }
+
+  // ---- NPC（契約16） -----------------------------------------------------
+
+  botSeats(): string[] {
+    return [...this.npcIds];
+  }
+
+  /**
+   * NPC 席のアクションを権威として直接適用する（BotRunner 専用）。
+   * この経路はローカル生成のみで受信配線を持たない（handleAction を通らない）ため、
+   * ゲストは到達できず、なりすまし検証（E7）と衝突しない。player は npcIds のみ許可し、
+   * ホスト専用アクション（startRound/closeWindow）や人間席は拒否する。
+   */
+  applyBot(action: Action): Promise<ActionResult> {
+    if (!('player' in action) || !this.npcIds.has(action.player)) {
+      return Promise.resolve({ ok: false, error: 'applyBot: not an NPC seat' });
+    }
+    const result = applyAction(this.state, action);
+    if (result.ok) this.commit(result.state);
+    return Promise.resolve(result);
   }
 
   claimDeadline(): number | null {

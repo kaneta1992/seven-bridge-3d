@@ -6,6 +6,7 @@
 import type { Action, Card, Meld, PlayerView } from '../core';
 import { canAttach, cardId } from '../core';
 import { LocalDriver } from '../driver/localDriver';
+import { BotRunner } from '../driver/botPlayer';
 import type { ClaimOption, GameDriver } from '../driver/types';
 import {
   CLAIM_WINDOW_MS,
@@ -55,6 +56,8 @@ export class GameUI {
   private scene: TableScene | null = null;
   private driver: GameDriver | null = null;
   private unsub: (() => void) | null = null;
+  // NPC 自動着手ループ（契約16）。権威（1人プレイ/ホスト）かつ NPC 席がある対局でのみ生存。
+  private bot: BotRunner | null = null;
   private session: NetSession | null = null;
   private waitInfo: WaitInfo | null = null;
   // 公開ルーム: ロビー画面の一覧閲覧チャネル（lobbyBrowser）と、ホストの広告チャネル（advertiser）。
@@ -214,6 +217,7 @@ export class GameUI {
     this.root.append(lobby);
     renderLobby(lobby, {
       onHotseat: (r) => this.startHotseat(r),
+      onSolo: (r) => this.startSolo(r),
       onCreateRoom: (cfg) => this.createRoom(cfg),
       onJoinRoom: (code, name) => this.joinRoom(code, name),
       watchPublicRooms: (cb) => this.watchPublicRooms(cb),
@@ -253,6 +257,8 @@ export class GameUI {
 
   private teardownGame(): void {
     this.teardownDemo(); // タイトル背景のデモ対局を停止（画面遷移のたびに確実に破棄・U4/E9）
+    this.bot?.dispose(); // NPC ループを確実に停止（多重着手防止・E3）
+    this.bot = null;
     this.unsub?.();
     this.unsub = null;
     this.scene?.dispose();
@@ -321,6 +327,20 @@ export class GameUI {
   private startHotseat(cfg: LobbyResult): void {
     this.teardownLobbyBrowser();
     const driver = new LocalDriver({ players: cfg.players, totalRounds: cfg.totalRounds });
+    this.beginWithDriver(driver);
+  }
+
+  // ---- 1人プレイ（人間1+NPC・契約16） ------------------------------------
+
+  private startSolo(cfg: LobbyResult): void {
+    this.teardownLobbyBrowser();
+    // 固定自席（人間）で作る＝手番が NPC に移っても視点/カメラが動かない。NPC 着手は BotRunner が担う。
+    const driver = new LocalDriver({
+      players: cfg.players,
+      totalRounds: cfg.totalRounds,
+      selfId: cfg.selfId,
+      npcIds: cfg.npcIds,
+    });
     this.beginWithDriver(driver);
   }
 
@@ -419,6 +439,13 @@ export class GameUI {
       canStart: info.amHost && info.members.length >= 2,
       onStart: () => this.startHostGame(),
       onLeave: () => this.showLobby(),
+      // ホスト専用: NPC の追加/削除（契約16）。session が名簿を更新し roster イベントで再描画される。
+      onAddNpc: info.amHost
+        ? () => {
+            if (!this.session?.addNpc()) this.toast('これ以上 NPC を追加できません（満席）', 'warn');
+          }
+        : undefined,
+      onRemoveNpc: info.amHost ? (pk: string) => this.session?.removeNpc(pk) : undefined,
     });
   }
 
@@ -476,6 +503,14 @@ export class GameUI {
     // 権威者（ホットシート/ホスト）だけが最初のラウンドを配る。ゲストはスナップショットで受け取る。
     if (driver.isAuthority?.() ?? true) void driver.dispatch({ type: 'startRound' });
     this.render();
+
+    // NPC（ボット）ループ: 権威かつ NPC 席がある対局でのみ起動（1人プレイ/ホスト）。
+    // ゲストは権威でないため起動せず、NPC はスナップショット上の普通のプレイヤーとして見える（契約16）。
+    const npcs = driver.botSeats?.() ?? [];
+    if ((driver.isAuthority?.() ?? true) && npcs.length > 0 && driver.applyBot) {
+      this.bot = new BotRunner(driver, npcs);
+      this.bot.start();
+    }
   }
 
   // ---- 描画 --------------------------------------------------------------

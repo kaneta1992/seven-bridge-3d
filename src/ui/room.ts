@@ -12,6 +12,10 @@ export interface WaitingRoomProps {
   canStart: boolean;
   onStart: () => void;
   onLeave: () => void;
+  /** ホスト: NPC（ボット）席を追加（契約16）。満席時は呼び出し側で拒否/トースト。 */
+  onAddNpc?: () => void;
+  /** ホスト: NPC 席を削除。 */
+  onRemoveNpc?: (pk: string) => void;
 }
 
 /** 接続中（ホスト応答待ち）画面。 */
@@ -33,11 +37,25 @@ export function renderWaitingRoom(root: HTMLElement, p: WaitingRoomProps): void 
   clear(root);
   const list = el('div', { class: 'melds' });
   p.members.forEach((m, i) => {
-    const tag = i === 0 ? '（ホスト）' : '';
-    list.append(el('div', { class: 'meld' }, [el('span', { class: 'owner', text: `${i + 1}. ${m.name}${tag}` })]));
+    const tag = i === 0 ? '（ホスト）' : m.npc ? '（NPC）' : '';
+    const row = el('div', { class: 'meld' }, [el('span', { class: 'owner', text: `${i + 1}. ${m.name}${tag}` })]);
+    // ホストは NPC 席に削除ボタンを出す（人間席は削除不可）。
+    if (p.amHost && m.npc && p.onRemoveNpc) {
+      const rm = el('button', { class: 'icon', text: '✕', title: 'NPCを削除' }) as HTMLButtonElement;
+      rm.onclick = () => p.onRemoveNpc!(m.pk);
+      row.append(rm);
+    }
+    list.append(row);
   });
   for (let i = p.members.length; i < p.maxPlayers; i++) {
     list.append(el('div', { class: 'meld' }, [el('span', { class: 'hint', text: `${i + 1}. 空席` })]));
+  }
+  // ホスト: NPC 追加（満席では非活性）。
+  if (p.amHost && p.onAddNpc) {
+    const addNpc = el('button', { text: '＋ NPCを追加' }) as HTMLButtonElement;
+    addNpc.disabled = p.members.length >= p.maxPlayers;
+    addNpc.onclick = () => p.onAddNpc!();
+    list.append(el('div', { class: 'row' }, [addNpc]));
   }
 
   const codeBox = el('div', { class: 'pill', text: p.code });

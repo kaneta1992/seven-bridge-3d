@@ -114,6 +114,8 @@ export interface HelloMsg {
 export interface RosterMember {
   pk: string;
   name: string;
+  /** NPC（ボット）席か（契約16）。ホストのみが true を立てる。ゲストからは普通の席として表示される。 */
+  npc?: boolean;
 }
 
 /** ホスト→全員: 待機ルームの名簿と設定（開始前・E1/E2）。公開情報のみ。 */

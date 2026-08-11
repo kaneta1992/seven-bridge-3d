@@ -3,6 +3,7 @@
 // ドライバ（HostDriver/GuestDriver）はここから注入された送信関数だけで通信し、
 // 受信ルーティングと peerId↔playerKey 束縛（E7/E8）はこのセッションが担う。
 import type { GameDriver } from '../driver/types';
+import { pickNpcName } from '../driver/botPlayer';
 import { HostDriver } from './hostDriver';
 import { GuestDriver } from './guestDriver';
 import {
@@ -70,6 +71,7 @@ export class NetSession {
   private pkToToken = new Map<string, string>();
   private started = false;
   private hostDriver: HostDriver | null = null;
+  private npcCounter = 0; // NPC 席 id の連番（ルーム内で一意にするため）
 
   // ゲスト状態
   private hostPeerId: string | null = null;
@@ -141,11 +143,13 @@ export class NetSession {
     // 呼び出し側（app.ts）は開始前にトーストで理由を提示するため、ここに到達するのは誤用のみ。
     if (this.roster.length < 2) throw new Error('startGame: need at least 2 players');
     const players = this.roster.map((m) => ({ id: m.pk, name: m.name }));
+    const npcIds = this.roster.filter((m) => m.npc).map((m) => m.pk);
     this.started = true;
     this.hostDriver = new HostDriver({
       players,
       selfPk: this.selfPk,
       totalRounds: this.hostOpts.totalRounds,
+      npcIds,
       resolvePeer: (pk) => (pk === this.selfPk ? null : (this.pkToPeer.get(pk) ?? null)),
       resolvePk: (peerId) => this.peerToPk.get(peerId) ?? null,
       sendSnap: (peerId, msg) => this.sendSnap(msg, peerId),
@@ -155,6 +159,31 @@ export class NetSession {
     this.sendStart({ players, totalRounds: this.hostOpts.totalRounds });
     this.handlers.started?.(this.hostDriver);
     return this.hostDriver;
+  }
+
+  /**
+   * ホスト: 待機ルームに NPC（ボット）席を1つ追加する（契約16）。満席/開始後/非ホストは拒否（null）。
+   * 名簿に載せて全ピアへ配信するため、ゲストからは普通のプレイヤーとして見える。着手はホスト権威が担う。
+   */
+  addNpc(): RosterMember | null {
+    if (this.role !== 'host' || !this.hostOpts || this.started) return null;
+    if (this.roster.length >= this.hostOpts.maxPlayers) return null; // 満席（SEAT_CAP）では拒否（E2）
+    const taken = new Set(this.roster.map((r) => r.name));
+    const member: RosterMember = { pk: `npc-${this.code}-${this.npcCounter++}`, name: pickNpcName(taken), npc: true };
+    this.roster.push(member);
+    this.broadcastRoster();
+    this.emitRoster();
+    return member;
+  }
+
+  /** ホスト: NPC 席を削除する（NPC 席のみ・開始後/非ホストは無視）。 */
+  removeNpc(pk: string): void {
+    if (this.role !== 'host' || !this.hostOpts || this.started) return;
+    const m = this.roster.find((r) => r.pk === pk);
+    if (!m || !m.npc) return; // 人間席は削除しない
+    this.roster = this.roster.filter((r) => r.pk !== pk);
+    this.broadcastRoster();
+    this.emitRoster();
   }
 
   /**

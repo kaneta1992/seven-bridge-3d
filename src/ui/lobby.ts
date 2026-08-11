@@ -1,6 +1,7 @@
 // タイトル/ロビー画面（要件 §3.3-1）。3導線: ホットシート / ルーム作成（通信対戦）/ ルーム参加。
 // モダンなカードUI + タブ + ブランドマーク（すべてシステムフォント/プロシージャル・外部アセットなし）。
 // 名前・人数・ラウンド数は localStorage に永続化し、次回起動時に自動復元する（項目6/7）。
+import { pickNpcName } from '../driver/botPlayer';
 import { normalizeRoomCode, SEAT_CAP, type RoomAd } from '../net/protocol';
 import { relayStatus } from '../net/trysteroTransport';
 import { clear, el } from './dom';
@@ -9,6 +10,10 @@ import { loadPrefs, savePrefs } from './settings';
 export interface LobbyResult {
   players: { id: string; name: string }[];
   totalRounds: number;
+  /** 1人プレイの固定自席 id（人間席）。未指定はホットシート。 */
+  selfId?: string;
+  /** NPC が担当する席 id（1人プレイ）。 */
+  npcIds?: string[];
 }
 
 export interface CreateRoomConfig {
@@ -19,6 +24,8 @@ export interface CreateRoomConfig {
 
 export interface LobbyCallbacks {
   onHotseat: (r: LobbyResult) => void;
+  /** 1人プレイ（人間1+NPC n）で開始（契約16）。 */
+  onSolo: (r: LobbyResult) => void;
   onCreateRoom: (cfg: CreateRoomConfig) => void;
   onJoinRoom: (code: string, name: string) => void;
   /** 公開ルーム一覧の購読（未提供なら公開タブは空表示・E4）。戻り値は解除関数。 */
@@ -27,7 +34,7 @@ export interface LobbyCallbacks {
 
 const DEFAULT_NAMES = ['あかり', 'はると', 'つむぎ', 'ゆうと', 'さくら', 'そうた'];
 const ROUND_CHOICES = [1, 2, 3, 4, 6, 8, 12, 20];
-type Mode = 'hotseat' | 'create' | 'join' | 'public';
+type Mode = 'solo' | 'hotseat' | 'create' | 'join' | 'public';
 
 // 画面内で共有する設定状態（名前はモード切替をまたいで引き継ぎ、submit で永続化する）。
 interface LobbyState {
@@ -57,6 +64,7 @@ export function renderLobby(root: HTMLElement, cb: LobbyCallbacks): void {
     { key: 'create', label: 'ルーム作成' },
     { key: 'public', label: '公開ルーム' },
     { key: 'join', label: 'コードで参加' },
+    { key: 'solo', label: '1人プレイ' },
     { key: 'hotseat', label: 'ホットシート' },
   ];
   for (const m of modes) {
@@ -74,7 +82,8 @@ export function renderLobby(root: HTMLElement, cb: LobbyCallbacks): void {
     unwatch?.();
     unwatch = null;
     clear(body);
-    if (mode === 'hotseat') body.append(hotseatForm(cb, state));
+    if (mode === 'solo') body.append(soloForm(cb, state));
+    else if (mode === 'hotseat') body.append(hotseatForm(cb, state));
     else if (mode === 'create') body.append(createForm(cb, state));
     else if (mode === 'public') unwatch = publicList(body, cb, state);
     else body.append(joinForm(cb, state));
@@ -225,6 +234,63 @@ function joinForm(cb: LobbyCallbacks, state: LobbyState): HTMLElement {
     field('ルームコード', codeInput),
     el('div', { class: 'row actions-row' }, [joinBtn]),
     err,
+  ]);
+}
+
+// ---- 1人プレイ（人間1+NPC n・契約16） -----------------------------------
+
+function soloForm(cb: LobbyCallbacks, state: LobbyState): HTMLElement {
+  const nameInput = nameField(state);
+  let npcCount = 2; // 既定: 自分1+NPC2
+  const namesPreview = el('div', { class: 'seg names' });
+  const renderPreview = (): void => {
+    clear(namesPreview);
+    const taken = new Set<string>();
+    for (let i = 0; i < npcCount; i++) {
+      const nm = pickNpcName(taken);
+      taken.add(nm);
+      namesPreview.append(el('span', { class: 'pill', text: nm }));
+    }
+  };
+
+  const countSeg = segSelect(
+    [1, 2, 3, 4, 5],
+    npcCount,
+    (n) => {
+      npcCount = n;
+      renderPreview();
+    },
+    (n) => `${n}体`,
+  );
+  const roundSeg = segSelect(ROUND_CHOICES, state.rounds, (r) => (state.rounds = r), String);
+
+  const startBtn = el('button', { class: 'primary', text: '1人で対局開始' }) as HTMLButtonElement;
+  startBtn.onclick = () => {
+    const human = cleanName(state.name, DEFAULT_NAMES[0]!);
+    savePrefs({ name: human, rounds: state.rounds });
+    const players = [{ id: 'you', name: human }];
+    const npcIds: string[] = [];
+    const taken = new Set<string>([human]);
+    for (let i = 0; i < npcCount; i++) {
+      const nm = pickNpcName(taken);
+      taken.add(nm);
+      players.push({ id: `npc${i}`, name: nm });
+      npcIds.push(`npc${i}`);
+    }
+    cb.onSolo({ players, totalRounds: state.rounds, selfId: 'you', npcIds });
+  };
+
+  renderPreview();
+  return el('div', {}, [
+    field('あなたの名前', nameInput),
+    field('NPCの人数', countSeg),
+    field('ラウンド数', roundSeg),
+    field('対戦相手（NPC）', namesPreview),
+    el('div', { class: 'row actions-row' }, [startBtn]),
+    el('p', {
+      class: 'hint',
+      text: 'NPC が自動で打ちます。あなたの手番だけ視点が自席に固定され、NPC の手札は伏せられます。',
+    }),
   ]);
 }
 

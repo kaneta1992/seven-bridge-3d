@@ -52,4 +52,19 @@ export interface GameDriver {
 
   /** リソース解放（ネットワーク切断など）。省略可。 */
   dispose?(): void;
+
+  // ---- 契約16 の NPC（ボット）拡張（すべて任意・省略時は NPC 非対応） ----
+
+  /**
+   * この対局で NPC（ボット）が担当する席の id 一覧。権威ドライバのみ返す（ゲストは省略/空）。
+   * app はこれと isAuthority() を見て BotRunner を起動する。
+   */
+  botSeats?(): string[];
+
+  /**
+   * NPC 席のアクションを権威として直接適用する（BotRunner 専用）。
+   * player が botSeats に含まれる席のときのみ受理する。ホスト権威実装ではこの経路は
+   * ローカル専用で受信配線を持たないため、なりすまし検証（E7・handleAction）とは衝突しない。
+   */
+  applyBot?(action: Action): Promise<ActionResult>;
 }
