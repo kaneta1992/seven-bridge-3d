@@ -32,6 +32,7 @@ import { clear, el } from './dom';
 import { renderLobby, type CreateRoomConfig, type LobbyResult } from './lobby';
 import { renderConnecting, renderJoinPrompt, renderNotice, renderWaitingRoom } from './room';
 import { buildScoreTable } from './scoreTable';
+import { seatTotals } from './scoreTotals';
 import { loadPrefs, savePrefs } from './settings';
 
 // スートのグリフ/配色は render/suitStyle を単一ソースとして共有（4色デッキ・項目2）。
@@ -128,6 +129,8 @@ export class GameUI {
   // 同じ局面では入場アニメ/カウントアップが再生し直さない。
   private endEl: HTMLElement | null = null;
   private endKey = '';
+  // ヘッダの自席累計失点（契約20項目3）。値が変わったフレームだけ topbar のピルへ更新演出（bump）を付ける。
+  private prevSelfScore = -1;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -371,6 +374,7 @@ export class GameUI {
     this.prevHandIds = [];
     this.lastRound = 0;
     this.lastPhaseKey = '';
+    this.prevSelfScore = -1;
   }
 
   private clearDrawTimers(): void {
@@ -839,7 +843,40 @@ export class GameUI {
       this.scene?.resetView();
       this.audio?.click();
     };
-    host.append(resetBtn, muteBtn, scoreBtn);
+    // タイトルへ戻る（契約20項目1）: 対局中いつでも離脱できる導線。誤タップ防止に確認を挟む。
+    const homeBtn = el('button', { class: 'icon', text: '🏠', title: 'タイトルに戻る' });
+    homeBtn.onclick = () => {
+      this.audio?.click();
+      this.confirmReturnToTitle();
+    };
+    host.append(homeBtn, resetBtn, muteBtn, scoreBtn);
+  }
+
+  // タイトルへ戻る確認（契約20項目1）。通信対戦では退室になる旨を明示。確定で既存の teardown 経路
+  // （showLobby → teardownGame/teardownNet）をそのまま再利用し、リスナー/タイマー/チャネルを確実に
+  // 解放する（リザルトの「ロビーに戻る」と同一経路）。画面遷移は R20 のワイプ（transition）を適用。
+  private confirmReturnToTitle(): void {
+    if (this.root.querySelector('.center.confirm-home')) return; // 連打での多重表示を防ぐ
+    const isNet = !!this.session;
+    const overlay = el('div', { class: 'center confirm-home' });
+    const back = el('button', { class: 'primary danger', text: 'タイトルに戻る' });
+    const cancel = el('button', { text: 'つづける' });
+    cancel.onclick = () => this.dismissCenter(overlay);
+    back.onclick = () => {
+      this.dismissCenter(overlay);
+      this.transition(() => this.showLobby()); // teardownGame + teardownNet を内包（通信は退室）
+    };
+    const modal = el('div', { class: 'modal' }, [
+      el('h1', { text: 'タイトルに戻る' }),
+      el('h2', { text: 'タイトル画面に戻りますか？' }),
+      el('p', {
+        class: 'hint',
+        text: isNet ? 'この対局から退室します。ほかのプレイヤーの対局は続きます。' : '現在の対局は終了します。',
+      }),
+      el('div', { class: 'row' }, [back, cancel]),
+    ]);
+    overlay.append(modal);
+    this.root.append(overlay);
   }
 
   private buildTopbar(view: PlayerView): HTMLElement {
@@ -851,12 +888,23 @@ export class GameUI {
         : view.phase === 'awaitingStart'
           ? '配札待ち…'
           : `${current?.name ?? '-'} さんの手番`;
+    // 自席の確定累計失点（契約20項目3①）: スコア票を開かずともヘッダで現在の累計が見える。
+    // 値が前回から変わったフレームだけ 'bump' を付け、さりげない更新演出にする（renderHud で毎回
+    // topbar を作り直すため、初回=前回未確定(-1)では演出しない）。
+    const myScore = seatTotals(view)[view.youIndex] ?? 0;
+    const bumped = this.prevSelfScore >= 0 && myScore !== this.prevSelfScore;
+    this.prevSelfScore = myScore;
+    const scorePill = el('span', { class: 'pill score' + (bumped ? ' bump' : ''), title: '自分の累計失点' }, [
+      el('span', { class: 'lbl', text: '失点' }),
+      el('span', { class: 'val', text: String(myScore) }),
+    ]);
     // 操作ボタン群は controlsEl（永続）へ分離済み。topbar は手番表示とピルのみ。右上は controls の
     // ためにあける（pill を左寄せ→spacer で右を空ける）。
     return el('div', { class: 'topbar' }, [
       el('span', { class: 'turn', text: turnText }),
       el('span', { class: 'pill', text: `ラウンド ${view.round}/${view.totalRounds}` }),
       el('span', { class: 'pill', text: `山札 ${view.deckCount}` }),
+      scorePill,
       el('span', { class: 'spacer' }),
     ]);
   }
@@ -1490,9 +1538,9 @@ export class GameUI {
 
   private buildResult(view: PlayerView): HTMLElement {
     const seats = view.seats.slice().sort((a, b) => a.index - b.index);
-    const totals = seats.map((s) => view.scores.reduce((sum, row) => sum + (row[s.index] ?? 0), 0));
+    const totals = seatTotals(view); // 席index毎の確定累計（ヘッダ/ネームプレートと同一集計・契約20項目3）
     const order = seats
-      .map((s, i) => ({ name: s.name, id: s.id, total: totals[i]! }))
+      .map((s) => ({ name: s.name, id: s.id, total: totals[s.index]! }))
       .sort((a, b) => a.total - b.total);
 
     const modal = el('div', { class: 'modal result' }, [

@@ -61,6 +61,11 @@ export class DemoTable {
       this.lastRound = view.round;
       this.meldIds = new Set(view.melds.map((m) => m.id));
     }
+    // 全席の実手札を表向きで見せる（契約20項目2）。デモは LocalDriver の公開API getView(席id) で各席の
+    // 自視点手札を引くだけ＝実対局の秘匿（他家は枚数のみ）には無関係。表示層だけの全公開。
+    const reveal = new Map<number, Card[]>();
+    for (const s of view.seats) reveal.set(s.index, this.driver.getView(s.id).hand);
+    this.scene.setDemoReveal(reveal);
     this.scene.update(view);
     const seatById = new Map(view.seats.map((s) => [s.id, s.index] as const));
     for (const m of view.melds) {

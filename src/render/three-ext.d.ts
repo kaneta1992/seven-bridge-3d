@@ -24,6 +24,7 @@ declare module 'three' {
   export class PMREMGenerator { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class WebGLRenderTarget { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export class Vector4 { [k: string]: AnyX; constructor(...a: AnyX[]); }
+  export class Matrix4 { [k: string]: AnyX; constructor(...a: AnyX[]); }
   export const MathUtils: AnyX;
   export const DynamicDrawUsage: AnyX;
   export const AdditiveBlending: AnyX;
@@ -32,6 +33,7 @@ declare module 'three' {
   export const BackSide: AnyX;
   export const FrontSide: AnyX;
   export const EquirectangularReflectionMapping: AnyX;
+  export const RepeatWrapping: AnyX;
 }
 
 declare module 'three/examples/jsm/postprocessing/EffectComposer.js' {
@@ -53,4 +55,8 @@ declare module 'three/examples/jsm/postprocessing/OutputPass.js' {
 declare module 'three/examples/jsm/postprocessing/ShaderPass.js' {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export class ShaderPass { [k: string]: any; constructor(...a: any[]); }
+}
+declare module 'three/examples/jsm/utils/BufferGeometryUtils.js' {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  export function mergeGeometries(geometries: any[], useGroups?: boolean): any;
 }

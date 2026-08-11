@@ -4,6 +4,7 @@
 // 即時テレポートを避ける（要件§3.2）。ジオメトリ/マテリアルは共有し draw call を抑制（E5）。
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
 import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
@@ -33,6 +34,10 @@ const DISCARD_C = new THREE.Vector3(-0.5, TABLE_TOP_Y, 0); // 捨て札の山の
 const DECK_QUAT = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
 const DISCARD_R = 0.62; // 捨て札ドロップ判定の半径（山札 +0.5 と干渉しない大きさ）
 const TABLE_R = 3.5; // 卓天板の半径（この外へのドロップは卓外＝取り消し）
+// 静的背景（家具・調度）の1メッシュ統合（契約20項目4）。初期化時にマテリアル毎（不透明/発光）へ
+// ジオメトリを事前統合し描画コールを最小化する。false にすると各プリミティブを個別メッシュで置く
+// ＝統合前の描画コール数を計測できる（before/after 比較用・恒久的な設計スイッチ）。
+const MERGE_FURNITURE = true;
 
 // ユーザーカメラ操作（契約17項目7）: 自席固定の首振り（見渡し）。視点位置は自席の目線に固定し、
 // ドラッグ/スワイプでヨー・ピッチ（見回し）、ピンチ/ホイールでズーム（FOV）を操作する。
@@ -93,6 +98,8 @@ export class TableScene {
   private bodyMat: THREE.MeshStandardMaterial;
   private backMat: THREE.MeshStandardMaterial;
   private frontMatCache = new Map<string, THREE.MeshStandardMaterial>();
+  // デモ手札公開の裏面用「表絵柄（U反転）」材質キャッシュ（契約20項目2・cardId キー・最大52枚で有界）。
+  private demoBackMatCache = new Map<string, THREE.MeshStandardMaterial>();
   private raycaster = new THREE.Raycaster(); // 3D メルドの当たり判定（付け札D&D・R4項目5）
 
   // 既知カード（面が判明: 自手札/捨て札/メルド）を cardId で管理
@@ -104,6 +111,9 @@ export class TableScene {
   private backById = new Map<string, CardObj>();
   // 直近フレームの他家手札枚数（席index→枚数）。+1 検出で他家ツモの山札→手札飛翔を起動する（項目3）。
   private backSeatCount = new Map<number, number>();
+  // タイトル背景デモ専用の手札公開（契約20項目2）。席index→実手札。設定時は syncBacks が裏向き浮遊札の
+  // 代わりに全席の実絵柄を表向きで浮かべる（表示層のみ・実対局の視界フィルタ deriveViewFor には無関係）。
+  private demoHands: Map<number, Card[]> | null = null;
 
   // カメラ演出
   private camPos = new THREE.Vector3(0, 4, 6);
@@ -476,158 +486,222 @@ export class TableScene {
    * 部屋の影・フォグ・60fps 目標に干渉しない。点光源はティアで加減し、明るさは発光メッシュで底上げする。
    */
   private buildFurniture(floorY: number, wallZ: number, H: number): void {
-    const add = (m: THREE.Mesh): THREE.Mesh => {
-      m.castShadow = false;
-      m.receiveShadow = false;
-      this.scene.add(m);
-      return m;
+    // 契約20項目4: 静的背景ジオメトリの1メッシュ統合。すべての家具プリミティブを「不透明(標準)」と
+    // 「発光(basic)」の2バケットへ頂点カラー付きで積み、初期化時に mergeGeometries でマテリアル毎に
+    // 1メッシュへ統合する（頂点カラーでマテリアル数を2まで圧縮＝描画コール最小化）。動く光/針は無いため
+    // 全家具が静的＝安全に統合できる。統合後の1メッシュは部屋全体を包む境界球になりフラスタムカリング
+    // されないが、描画コール削減が主目的のため許容（契約20 E4）。影/フォグ/Bloom は据え置き:
+    // 全家具は cast/receive=false・既定レイヤ(0)のまま＝選択的 Bloom（レイヤ1抽出）に一切載らない。
+    const opaque: THREE.BufferGeometry[] = []; // MeshStandardMaterial(vertexColors) 行き
+    const glow: THREE.BufferGeometry[] = []; // MeshBasicMaterial(vertexColors) 行き＝発光面
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const unitCyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 14);
+    const unitPlane = new THREE.PlaneGeometry(1, 1);
+    const P = new THREE.Vector3();
+    const S = new THREE.Vector3();
+    const Q = new THREE.Quaternion();
+    const E = new THREE.Euler();
+    const M = new THREE.Matrix4();
+    const tmpCol = new THREE.Color();
+    // 1プリミティブ = 「単位ジオメトリを w/h/d 拡縮 + 回転 + 平行移動して焼き込み、頂点カラーを塗って
+    // バケットへ積む」。頂点カラーは sRGB→リニア変換して従来の material.color と同じ見た目にする。
+    const bake = (
+      bucket: THREE.BufferGeometry[], geom: THREE.BufferGeometry, color: string,
+      w: number, h: number, d: number, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0,
+    ): void => {
+      E.set(rx, ry, rz, 'YXZ');
+      Q.setFromEuler(E);
+      M.compose(P.set(x, y, z), Q, S.set(w, h, d));
+      geom.applyMatrix4(M);
+      tmpCol.set(color).convertSRGBToLinear();
+      const n = geom.attributes.position.count;
+      const ca = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        ca[i * 3] = tmpCol.r;
+        ca[i * 3 + 1] = tmpCol.g;
+        ca[i * 3 + 2] = tmpCol.b;
+      }
+      geom.setAttribute('color', new THREE.Float32BufferAttribute(ca, 3));
+      bucket.push(geom);
     };
-    // 共有ジオメトリ（単位立方体/単位円柱）をスケールで使い回し、頂点・生成コストを抑える。
-    const box = new THREE.BoxGeometry(1, 1, 1);
-    const cyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 14);
-    const mat = (color: string, rough = 0.9, metal = 0): THREE.MeshStandardMaterial =>
-      new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal });
-    const emis = (color: string): THREE.MeshBasicMaterial => new THREE.MeshBasicMaterial({ color });
-    const boxMesh = (m: THREE.Material, w: number, h: number, d: number, x: number, y: number, z: number, ry = 0): THREE.Mesh => {
-      const me = new THREE.Mesh(box, m);
-      me.scale.set(w, h, d);
-      me.position.set(x, y, z);
-      me.rotation.y = ry;
-      return add(me);
-    };
-    const cylMesh = (m: THREE.Material, r: number, h: number, x: number, y: number, z: number): THREE.Mesh => {
-      const me = new THREE.Mesh(cyl, m);
-      me.scale.set(r * 2, h, r * 2);
-      me.position.set(x, y, z);
-      return add(me);
-    };
-    const woodDark = mat('#3f2c1a', 0.8);
-    const woodMid = mat('#6b4a2c', 0.75);
+    const boxP = (color: string, w: number, h: number, d: number, x: number, y: number, z: number, ry = 0): void =>
+      bake(opaque, unitBox.clone(), color, w, h, d, x, y, z, 0, ry, 0);
+    const cylP = (color: string, r: number, h: number, x: number, y: number, z: number): void =>
+      bake(opaque, unitCyl.clone(), color, r * 2, h, r * 2, x, y, z);
+    const woodDark = '#3f2c1a';
+    const woodMid = '#6b4a2c';
 
-    // ラグ（卓の下・床の上）: 薄い円盤 + 縁取りリング。フェルト卓の緑と調和する落ち着いた臙脂。
-    const rug = new THREE.Mesh(new THREE.CircleGeometry(5.2, 40), mat('#5b2f2c', 1));
-    rug.rotation.x = -Math.PI / 2;
-    rug.position.set(0, floorY + 0.02, 0);
-    add(rug);
-    const rugRing = new THREE.Mesh(new THREE.RingGeometry(4.5, 5.0, 40), mat('#7a4a3a', 1));
-    rugRing.rotation.x = -Math.PI / 2;
-    rugRing.position.set(0, floorY + 0.03, 0);
-    add(rugRing);
+    // ラグ（卓の下・床の上）: 薄い円盤 + 二重の縁取りリング。フェルト卓の緑と調和する臙脂。
+    bake(opaque, new THREE.CircleGeometry(5.2, 40), '#5b2f2c', 1, 1, 1, 0, floorY + 0.02, 0, -Math.PI / 2);
+    bake(opaque, new THREE.RingGeometry(4.5, 5.0, 40), '#7a4a3a', 1, 1, 1, 0, floorY + 0.03, 0, -Math.PI / 2);
+    bake(opaque, new THREE.RingGeometry(3.7, 3.85, 40), '#6e4436', 1, 1, 1, 0, floorY + 0.03, 0, -Math.PI / 2);
 
-    // 窓（-z 壁）+ 十字桟 + 左右カーテン。発光パネルは MeshBasic（Bloom 非対象・レイヤ0）。
+    // 窓（-z 壁）+ 十字桟 + 左右カーテン。発光パネルは glow バケット（Bloom 非対象・レイヤ0）。
     const winW = 5.0;
     const winH = 3.2;
     const winY = floorY + 3.4;
     const winZ = -wallZ + 0.06;
-    add(new THREE.Mesh(new THREE.PlaneGeometry(winW, winH), emis('#ffd7a0'))).position.set(-3, winY, winZ);
-    const frameMat = emis('#241708');
-    boxMesh(frameMat, 0.14, winH + 0.3, 0.06, -3, winY, winZ + 0.02);
-    boxMesh(frameMat, winW + 0.3, 0.14, 0.06, -3, winY, winZ + 0.02);
-    boxMesh(woodDark, winW + 0.6, 0.28, 0.24, -3, winY + winH / 2 + 0.2, winZ + 0.02); // 窓上枠
-    const curtain = mat('#8a3f38', 0.95);
-    boxMesh(curtain, 1.0, winH + 0.8, 0.14, -3 - winW / 2 - 0.3, winY, winZ + 0.12);
-    boxMesh(curtain, 1.0, winH + 0.8, 0.14, -3 + winW / 2 + 0.3, winY, winZ + 0.12);
-
-    // 本棚（+x 壁ぎわ）: 枠 + 棚板 + カラフルな背表紙（小さな箱を並べる）。
-    const shelfX = wallZ - 0.5;
-    const shelfY = floorY + 1.9;
-    boxMesh(woodMid, 0.4, 3.6, 2.6, shelfX, shelfY, -3); // 側板・背
-    const bookColors = ['#b5462f', '#3f6ea5', '#c9a23a', '#4d7a4a', '#7a4a86', '#c26b3a'];
-    for (let s = 0; s < 4; s++) {
-      const sy = floorY + 0.55 + s * 0.85;
-      boxMesh(woodDark, 0.36, 0.08, 2.5, shelfX - 0.06, sy - 0.2, -3); // 棚板
-      for (let b = 0; b < 9; b++) {
-        const bc = bookColors[(s * 3 + b) % bookColors.length]!;
-        const bh = 0.5 + ((b * 7 + s * 3) % 5) * 0.05;
-        boxMesh(mat(bc, 0.85), 0.28, bh, 0.16, shelfX - 0.06, sy + bh / 2 - 0.16, -3 - 1.05 + b * 0.26);
-      }
+    bake(glow, unitPlane.clone(), '#ffd7a0', winW, winH, 1, -3, winY, winZ);
+    bake(glow, unitBox.clone(), '#241708', 0.14, winH + 0.3, 0.06, -3, winY, winZ + 0.02); // 縦桟
+    bake(glow, unitBox.clone(), '#241708', winW + 0.3, 0.14, 0.06, -3, winY, winZ + 0.02); // 横桟
+    boxP(woodDark, winW + 0.6, 0.28, 0.24, -3, winY + winH / 2 + 0.2, winZ + 0.02); // 窓上枠
+    const curtain = '#8a3f38';
+    for (const sx of [-1, 1]) {
+      boxP(curtain, 1.0, winH + 0.8, 0.14, -3 + sx * (winW / 2 + 0.3), winY, winZ + 0.12);
+      // カーテンのひだ（縦の細板・密度向上）
+      for (let f = 0; f < 3; f++)
+        boxP('#742f2c', 0.16, winH + 0.8, 0.05, -3 + sx * (winW / 2 + 0.1 + f * 0.22), winY, winZ + 0.2);
     }
 
-    // ソファ（-x 壁ぎわ・卓へ向く）: 座面 + 背 + 肘掛け + クッション。
-    const sofaX = -wallZ + 1.0;
-    const sofaBase = mat('#3f5b6e', 0.95);
-    boxMesh(sofaBase, 1.5, 0.7, 4.2, sofaX, floorY + 0.35, 2); // 座面
-    boxMesh(sofaBase, 0.6, 1.5, 4.2, sofaX - 0.55, floorY + 0.9, 2); // 背
-    boxMesh(sofaBase, 1.6, 1.0, 0.5, sofaX, floorY + 0.7, 2 - 2.1); // 肘掛け
-    boxMesh(sofaBase, 1.6, 1.0, 0.5, sofaX, floorY + 0.7, 2 + 2.1);
-    boxMesh(mat('#c9a23a', 0.9), 0.9, 0.5, 0.9, sofaX + 0.2, floorY + 0.85, 1.1); // クッション
-    boxMesh(mat('#b5462f', 0.9), 0.9, 0.5, 0.9, sofaX + 0.2, floorY + 0.85, 2.9);
+    // 本棚（+x 壁ぎわ）: 枠 + 棚板を増やし（6段）背表紙をぎっしり（各段12冊）。上に小物も置く。
+    const shelfX = wallZ - 0.5;
+    const shelfY = floorY + 2.2;
+    boxP(woodMid, 0.42, 4.4, 2.9, shelfX, shelfY, -3); // 側板・背
+    const bookColors = ['#b5462f', '#3f6ea5', '#c9a23a', '#4d7a4a', '#7a4a86', '#c26b3a', '#2f6e6a', '#a84a6f'];
+    for (let s = 0; s < 6; s++) {
+      const sy = floorY + 0.5 + s * 0.72;
+      boxP(woodDark, 0.38, 0.07, 2.7, shelfX - 0.06, sy - 0.16, -3); // 棚板
+      for (let b = 0; b < 12; b++) {
+        const bc = bookColors[(s * 5 + b) % bookColors.length]!;
+        const bh = 0.42 + ((b * 7 + s * 3) % 5) * 0.045;
+        const lean = b % 7 === 6 ? 0.18 : 0; // ときどき傾いた本
+        bake(opaque, unitBox.clone(), bc, 0.24, bh, 0.14, shelfX - 0.06, sy + bh / 2 - 0.12, -3 - 1.28 + b * 0.235, 0, 0, lean);
+      }
+    }
+    // 本棚上の飾り（花瓶・小箱）
+    cylP('#7a9bb0', 0.16, 0.5, shelfX - 0.06, shelfY + 2.35, -3.6);
+    boxP('#c9a23a', 0.4, 0.3, 0.3, shelfX - 0.06, shelfY + 2.3, -2.4);
 
-    // サイドテーブル + ランプ（ソファ脇）: 天板 + 脚 + ランプ台 + 発光シェード。
+    // ソファ（-x 壁ぎわ・卓へ向く）: 座面 + 背 + 肘掛け + クッション4つ + 足クッション。
+    const sofaX = -wallZ + 1.0;
+    const sofaBase = '#3f5b6e';
+    boxP(sofaBase, 1.5, 0.7, 4.2, sofaX, floorY + 0.35, 2); // 座面
+    boxP(sofaBase, 0.6, 1.5, 4.2, sofaX - 0.55, floorY + 0.9, 2); // 背
+    boxP(sofaBase, 1.6, 1.0, 0.5, sofaX, floorY + 0.7, 2 - 2.1); // 肘掛け
+    boxP(sofaBase, 1.6, 1.0, 0.5, sofaX, floorY + 0.7, 2 + 2.1);
+    const cushCol = ['#c9a23a', '#b5462f', '#4d7a4a', '#7a4a86'];
+    for (let c = 0; c < 4; c++)
+      boxP(cushCol[c]!, 0.85, 0.5, 0.85, sofaX + 0.2, floorY + 0.85, 0.7 + c * 0.85, (c % 2 ? 0.2 : -0.2));
+    boxP('#2f6e6a', 1.1, 0.4, 1.1, sofaX + 1.3, floorY + 0.2, 2); // 足置きクッション
+
+    // サイドテーブル + ランプ（ソファ脇）: 天板 + 脚 + ランプ台 + 発光シェード + 卓上の本/マグ。
     const stX = -wallZ + 1.2;
     const stZ = -1.6;
-    cylMesh(woodMid, 0.55, 0.12, stX, floorY + 1.0, stZ); // 天板
-    boxMesh(woodDark, 0.14, 1.0, 0.14, stX, floorY + 0.5, stZ); // 脚
-    cylMesh(mat('#20242b', 0.6, 0.2), 0.08, 0.5, stX, floorY + 1.3, stZ); // ランプ支柱
-    add(new THREE.Mesh(new THREE.ConeGeometry(0.42, 0.5, 18, 1, true), emis('#ffdca0'))).position.set(stX, floorY + 1.75, stZ); // シェード（発光）
+    cylP(woodMid, 0.55, 0.12, stX, floorY + 1.0, stZ); // 天板
+    boxP(woodDark, 0.14, 1.0, 0.14, stX, floorY + 0.5, stZ); // 脚
+    cylP('#20242b', 0.08, 0.5, stX, floorY + 1.3, stZ); // ランプ支柱
+    bake(glow, new THREE.ConeGeometry(0.42, 0.5, 18, 1, true), '#ffdca0', 1, 1, 1, stX, floorY + 1.75, stZ); // シェード
+    boxP('#b5462f', 0.34, 0.12, 0.24, stX + 0.2, floorY + 1.12, stZ + 0.15); // 卓上の本
+    cylP('#d8d2c4', 0.09, 0.14, stX - 0.18, floorY + 1.13, stZ - 0.1); // マグ
 
-    // 観葉植物（隅 2 か所）: 鉢 + 葉（低ポリの円錐を数枚）。
+    // 観葉植物（隅 3 か所）: 鉢 + 葉（低ポリの円錐を数枚）。
     const plant = (px: number, pz: number): void => {
-      cylMesh(mat('#7a4a2c', 0.9), 0.45, 0.7, px, floorY + 0.35, pz); // 鉢
-      const leaf = mat('#3f6b3a', 0.85);
-      for (let i = 0; i < 5; i++) {
-        const a = (i / 5) * Math.PI * 2;
-        const cone = new THREE.Mesh(new THREE.ConeGeometry(0.34, 1.7, 8), leaf);
-        cone.position.set(px + Math.cos(a) * 0.18, floorY + 1.5, pz + Math.sin(a) * 0.18);
-        cone.rotation.z = Math.cos(a) * 0.3;
-        cone.rotation.x = Math.sin(a) * 0.3;
-        add(cone);
+      cylP('#7a4a2c', 0.45, 0.7, px, floorY + 0.35, pz); // 鉢
+      cylP('#4a3524', 0.4, 0.12, px, floorY + 0.72, pz); // 土
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        bake(opaque, new THREE.ConeGeometry(0.34, 1.7, 8), '#3f6b3a',
+          1, 1, 1, px + Math.cos(a) * 0.18, floorY + 1.5, pz + Math.sin(a) * 0.18, Math.sin(a) * 0.3, 0, Math.cos(a) * 0.3);
       }
     };
     plant(wallZ - 1.2, wallZ - 1.2);
     plant(-wallZ + 1.2, wallZ - 1.2);
+    plant(-wallZ + 1.2, -wallZ + 3.0);
 
-    // 壁の額（+z 壁に 3 枚）: 額縁 + 単色の抽象画パネル。
-    const artColors = ['#3f6ea5', '#8a6f3a', '#5b7a4a'];
-    for (let i = 0; i < 3; i++) {
-      const ax = -3.2 + i * 3.2;
-      boxMesh(woodDark, 1.7, 1.3, 0.08, ax, floorY + 3.2, wallZ - 0.05); // 額縁
-      boxMesh(mat(artColors[i]!, 0.8), 1.45, 1.05, 0.02, ax, floorY + 3.2, wallZ - 0.09); // 画
+    // 壁の額（+z 壁に 5 枚のギャラリー）: 額縁 + 単色の抽象画パネル。高さ違いで賑やかに。
+    const artColors = ['#3f6ea5', '#8a6f3a', '#5b7a4a', '#a84a6f', '#4a6f86'];
+    for (let i = 0; i < 5; i++) {
+      const ax = -4.4 + i * 2.2;
+      const ah = i % 2 ? 1.5 : 1.1;
+      boxP(woodDark, 1.5, ah + 0.25, 0.08, ax, floorY + 3.4, wallZ - 0.05); // 額縁
+      boxP(artColors[i]!, 1.3, ah, 0.02, ax, floorY + 3.4, wallZ - 0.09); // 画
     }
 
-    // 天井照明: 発光する円盤シェード + 弱い環状の造形（真下の卓を柔らかく照らす見た目）。
+    // 天井照明: 発光する円盤シェード + 吊り棒 + 左右の小ペンダント（密度向上）。
     const ceilY = floorY + H - 0.15;
-    cylMesh(emis('#fff0d0'), 0.9, 0.14, 0, ceilY, 0);
-    cylMesh(mat('#2a2018', 0.7), 0.05, 0.5, 0, ceilY - 0.35, 0); // 吊り棒
+    bake(glow, unitCyl.clone(), '#fff0d0', 1.8, 0.14, 1.8, 0, ceilY, 0);
+    cylP('#2a2018', 0.05, 0.5, 0, ceilY - 0.35, 0); // 吊り棒
+    for (const px of [-3.5, 3.5]) {
+      cylP('#2a2018', 0.03, 0.7, px, ceilY - 0.35, 3.2);
+      bake(glow, new THREE.ConeGeometry(0.3, 0.4, 16, 1, true), '#ffe6b0', 1, 1, 1, px, ceilY - 0.7, 3.2, Math.PI);
+    }
 
-    // 天井の梁（項目6・密度向上）: 見上げても「しつらえられた部屋」に見えるよう、木の梁を2本渡す。
-    // 中央の吊り照明を避けて x=±5 に配置（首振りで天井方向を見たときの構造感）。
-    for (const bx of [-5, 5]) boxMesh(woodDark, 0.3, 0.3, wallZ * 2 - 1.2, bx, ceilY - 0.12, 0);
+    // 天井の梁（項目6・密度向上）: 木の梁を格子状に（縦2 + 横2）。中央の吊り照明を避けて配置。
+    for (const bx of [-5, 5]) boxP(woodDark, 0.3, 0.3, wallZ * 2 - 1.2, bx, ceilY - 0.12, 0);
+    for (const bz of [-5, 5]) boxP(woodDark, wallZ * 2 - 1.2, 0.26, 0.26, 0, ceilY - 0.1, bz);
 
-    // サイドボード + 小物（+z 壁・額の下）: 長い低いキャビネット天板 + 引き出し面 + 花瓶/本/置時計（項目6）。
+    // サイドボード + 小物（+z 壁・額の下）: キャビネット + 引き出し + 花瓶/積み本/食器/置時計/燭台（項目6）。
     const sbY = floorY + 0.55;
     const sbZ = wallZ - 0.42;
-    boxMesh(woodMid, 3.6, 1.1, 0.7, 0, sbY, sbZ); // 本体
-    boxMesh(woodDark, 3.7, 0.12, 0.78, 0, sbY + 0.6, sbZ); // 天板
-    boxMesh(mat('#2a1e12', 0.7), 1.6, 0.7, 0.04, -0.9, sbY, sbZ - 0.34); // 引き出し面（左）
-    boxMesh(mat('#2a1e12', 0.7), 1.6, 0.7, 0.04, 0.9, sbY, sbZ - 0.34); // 引き出し面（右）
-    cylMesh(mat('#7a9bb0', 0.4, 0.1), 0.13, 0.5, -1.2, sbY + 0.9, sbZ); // 花瓶
-    boxMesh(mat('#b5462f', 0.85), 0.5, 0.28, 0.34, 1.1, sbY + 0.78, sbZ); // 積み本
-    boxMesh(mat('#3f6ea5', 0.85), 0.44, 0.2, 0.3, 1.1, sbY + 0.98, sbZ); // 積み本（上）
+    boxP(woodMid, 4.4, 1.1, 0.7, 0, sbY, sbZ); // 本体
+    boxP(woodDark, 4.5, 0.12, 0.78, 0, sbY + 0.6, sbZ); // 天板
+    for (const dx of [-1.5, -0.5, 0.5, 1.5]) boxP('#2a1e12', 0.9, 0.7, 0.04, dx, sbY, sbZ - 0.34); // 引き出し面
+    for (const dx of [-1.5, -0.5, 0.5, 1.5]) cylP('#b8a06a', 0.04, 0.12, dx, sbY, sbZ - 0.4); // 取っ手
+    cylP('#7a9bb0', 0.13, 0.5, -1.7, sbY + 0.9, sbZ); // 花瓶
+    cylP('#c9a23a', 0.05, 0.35, -1.7, sbY + 1.25, sbZ); // 花瓶の花（茎）
+    boxP('#b5462f', 0.5, 0.28, 0.34, 1.6, sbY + 0.78, sbZ); // 積み本
+    boxP('#3f6ea5', 0.44, 0.2, 0.3, 1.6, sbY + 0.98, sbZ); // 積み本（上）
+    // 食器（皿の重ね + ボウル + 器）: 薄い円柱の積み重ね（食卓感の小物・項目4）。
+    for (let p = 0; p < 3; p++) cylP('#e8e0d2', 0.22 - p * 0.02, 0.03, -0.7, sbY + 0.68 + p * 0.04, sbZ);
+    cylP('#c26b3a', 0.18, 0.16, -0.2, sbY + 0.74, sbZ); // ボウル
+    cylP('#6b8f9a', 0.12, 0.2, 0.5, sbY + 0.76, sbZ); // 器
     // 置時計（サイドボード上・小物）: 枠 + 発光文字盤。
-    boxMesh(woodDark, 0.4, 0.5, 0.18, 0.1, sbY + 0.9, sbZ); // 時計筐体
-    add(new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.32), emis('#fef0c8'))).position.set(0.1, sbY + 0.92, sbZ - 0.1);
+    boxP(woodDark, 0.4, 0.5, 0.18, 0.9, sbY + 0.9, sbZ); // 時計筐体
+    bake(glow, unitPlane.clone(), '#fef0c8', 0.26, 0.32, 1, 0.9, sbY + 0.92, sbZ - 0.1);
+    // 燭台（発光の炎付き・両端）。
+    for (const cx of [-2.0, 2.0]) {
+      cylP('#b8a06a', 0.05, 0.4, cx, sbY + 0.86, sbZ);
+      bake(glow, new THREE.ConeGeometry(0.05, 0.14, 8), '#ffcf7a', 1, 1, 1, cx, sbY + 1.12, sbZ);
+    }
 
     // 壁掛け時計（-x 壁・ソファ上）: 丸い文字盤 + 針。首振りで側方を見たときのアクセント（項目6）。
     const clockX = -wallZ + 0.12;
     const clockY = floorY + 4.2;
-    const clockFace = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.08, 24), emis('#f3ead2'));
-    clockFace.rotation.z = Math.PI / 2; // 円盤面を +x（室内側）へ向ける
-    clockFace.position.set(clockX, clockY, 1.0);
-    add(clockFace);
-    const clockRim = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.05, 10, 28), mat('#2a1e12', 0.6));
-    clockRim.rotation.y = Math.PI / 2;
-    clockRim.position.set(clockX + 0.02, clockY, 1.0);
-    add(clockRim);
-    boxMesh(mat('#1b1610', 0.6), 0.03, 0.34, 0.04, clockX + 0.06, clockY + 0.08, 1.0); // 長針
-    boxMesh(mat('#1b1610', 0.6), 0.03, 0.04, 0.24, clockX + 0.06, clockY, 1.0); // 短針
+    bake(glow, new THREE.CylinderGeometry(0.5, 0.5, 0.08, 24), '#f3ead2', 1, 1, 1, clockX, clockY, 1.0, 0, 0, Math.PI / 2);
+    bake(opaque, new THREE.TorusGeometry(0.5, 0.05, 10, 28), '#2a1e12', 1, 1, 1, clockX + 0.02, clockY, 1.0, 0, Math.PI / 2, 0);
+    boxP('#1b1610', 0.03, 0.34, 0.04, clockX + 0.06, clockY + 0.08, 1.0); // 長針
+    boxP('#1b1610', 0.03, 0.04, 0.24, clockX + 0.06, clockY, 1.0); // 短針
+
+    // 床の小物（生活感の密度・項目4）: 積み雑誌 + 収納カゴ + 丸いプフ（オットマン）。
+    boxP('#4d7a4a', 0.9, 0.12, 0.7, -2.5, floorY + 0.06, -2.5); // 雑誌の山
+    boxP('#c9a23a', 0.85, 0.1, 0.66, -2.55, floorY + 0.18, -2.45, 0.15);
+    cylP('#8a6f4a', 0.4, 0.5, 3.0, floorY + 0.25, -3.2); // 収納カゴ
+    cylP('#a84a6f', 0.55, 0.45, 3.2, floorY + 0.22, 2.8); // 丸プフ
 
     // フロアスタンドライト（+x/-z 角・本棚と窓の間）: 台 + 支柱 + 発光シェード（項目6・照明で加点）。
     const flX = wallZ - 1.0;
     const flZ = -wallZ + 1.2;
-    cylMesh(mat('#20242b', 0.5, 0.2), 0.28, 0.1, flX, floorY + 0.05, flZ); // 台座
-    cylMesh(mat('#20242b', 0.5, 0.2), 0.05, 2.4, flX, floorY + 1.2, flZ); // 支柱
-    add(new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.6, 20, 1, true), emis('#ffe6b0'))).position.set(flX, floorY + 2.5, flZ); // シェード
+    cylP('#20242b', 0.28, 0.1, flX, floorY + 0.05, flZ); // 台座
+    cylP('#20242b', 0.05, 2.4, flX, floorY + 1.2, flZ); // 支柱
+    bake(glow, new THREE.CylinderGeometry(0.34, 0.42, 0.6, 20, 1, true), '#ffe6b0', 1, 1, 1, flX, floorY + 2.5, flZ); // シェード
+
+    // ---- 2バケットを統合し、シーンへ最少メッシュで追加（契約20項目4の中核） ----
+    const opaqueMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
+    const glowMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    const flush = (bucket: THREE.BufferGeometry[], material: THREE.Material): void => {
+      if (!bucket.length) return;
+      if (MERGE_FURNITURE) {
+        const merged = mergeGeometries(bucket, false); // useGroups=false ＝ 1グループ＝1描画コール
+        for (const g of bucket) g.dispose?.(); // 統合済みの中間ジオメトリを解放（頂点は merged が保持）
+        const mesh = new THREE.Mesh(merged, material);
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        this.scene.add(mesh);
+      } else {
+        // 計測用（統合前）: 各プリミティブを個別メッシュで置く＝統合前の描画コール数になる。
+        for (const g of bucket) {
+          const mesh = new THREE.Mesh(g, material);
+          mesh.castShadow = false;
+          mesh.receiveShadow = false;
+          this.scene.add(mesh);
+        }
+      }
+    };
+    flush(opaque, opaqueMat);
+    flush(glow, glowMat);
+    unitBox.dispose?.();
+    unitCyl.dispose?.();
+    unitPlane.dispose?.();
 
     // 照明: 環境光/半球光は buildEnvironment で全ティア明るめ。ここでは温かみの点光源を足す。
     // 高ティアは窓＋ランプ＋天井の3点光源、低ティアは天井1点に絞って軽量化（ジオメトリは同一・U1）。
@@ -669,7 +743,35 @@ export class TableScene {
     return m;
   }
 
-  private buildCard(card: Card | null): THREE.Group {
+  /**
+   * デモ手札公開（契約20項目2）用: 札の裏面(-z)に貼る「表絵柄」材質。-z 面は Y軸180°回転で置かれ、その
+   * ままでは絵柄が左右反転して見えるため、テクスチャの U を反転（repeat.x=-1）して非反転で読める向きに
+   * する。cardId でキャッシュ（frontMatCache と同パターン・最大52枚で有界）。反転テクスチャは共有module
+   * テクスチャではないので dispose で map も明示解放する。
+   */
+  private demoBackFaceMat(card: Card): THREE.MeshStandardMaterial {
+    const key = cardId(card);
+    let m = this.demoBackMatCache.get(key);
+    if (!m) {
+      const tex = faceTexture(card).clone();
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.repeat.x = -1;
+      tex.offset.x = 1;
+      tex.needsUpdate = true;
+      m = new THREE.MeshPhysicalMaterial({
+        map: tex,
+        roughness: 0.42,
+        metalness: 0.02,
+        clearcoat: 0.55,
+        clearcoatRoughness: 0.25,
+        envMapIntensity: 0.4,
+      });
+      this.demoBackMatCache.set(key, m);
+    }
+    return m;
+  }
+
+  private buildCard(card: Card | null, faceBoth = false): THREE.Group {
     const g = new THREE.Group();
     // 材質はカードごとに複製する（opacity を個別に動かすため・Q5/Q6/U3）。マップ（テクスチャ）は
     // クローンでも参照共有されるので重い資源は増えない。transparent=true / depthWrite=true 固定で、
@@ -688,7 +790,9 @@ export class TableScene {
     body.receiveShadow = true;
     g.add(body);
 
-    const back = new THREE.Mesh(this.planeGeo, prep(this.backMat));
+    // 裏面: 通常は裏絵柄。デモ公開（faceBoth）では表絵柄（U反転で非反転）を貼り、卓のどの側からも
+    // 実絵柄が表向きに見える（契約20項目2）。単面カードでは1カメラから全席を表向きにできないための措置。
+    const back = new THREE.Mesh(this.planeGeo, prep(faceBoth && card ? this.demoBackFaceMat(card) : this.backMat));
     back.rotation.y = Math.PI;
     back.position.z = -(CARD_D / 2 + 0.006); // 本体面から十分に離し共面を避ける
     g.add(back);
@@ -1152,6 +1256,15 @@ export class TableScene {
     this.wake();
   }
 
+  /**
+   * タイトル背景デモの手札公開（契約20項目2）。全席の実手札（席index→カード列）を渡すと、次回以降の
+   * update() で裏向き浮遊札の代わりに実絵柄を表向きで浮かべる。null で通常（裏向き）へ戻す。デモ専用で、
+   * 実対局では呼ばれない＝通常対局の秘匿（他家手札は枚数のみ）には一切影響しない（E2）。
+   */
+  setDemoReveal(hands: Map<number, Card[]> | null): void {
+    this.demoHands = hands;
+  }
+
   /** タイトル背景のデモ対局用: シネマティックカメラの有効化（U4/契約19項目5）。 */
   setCinematic(on: boolean): void {
     this.cinematic = on;
@@ -1395,11 +1508,17 @@ export class TableScene {
   private updateLabels(view: PlayerView): void {
     const n = view.seats.length;
     const portrait = this.aspect() < 1;
+    // 席ごとの確定累計失点（契約20項目3②）。scores を縦合計（app.ts の seatTotals と同一集計だが、
+    // render→ui の逆依存を避けるためここは同式をインラインで持つ）。値変化はキーに載せ、既存の
+    // クロスフェード（Q8）でさりげなく更新演出になる。
+    const totals = new Array<number>(n).fill(0);
+    for (const row of view.scores) for (let i = 0; i < n; i++) totals[i]! += row[i] ?? 0;
     for (const seat of view.seats) {
-      const key = `${seat.name}|${seat.isCurrent ? 1 : 0}`;
+      const score = totals[seat.index] ?? 0;
+      const key = `${seat.name}|${seat.isCurrent ? 1 : 0}|${score}`;
       let L = this.labels.get(seat.index);
       if (!L) {
-        const tex = this.makeLabelTexture(seat.name, seat.isCurrent);
+        const tex = this.makeLabelTexture(seat.name, seat.isCurrent, score);
         // 席名ラベルは手札やカードより常に優先して見える（U2）: depthTest=false + 高い renderOrder で
         // 浮遊手札の裏面に隠れず最前面へ描く。可読性が勝つ。
         const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, opacity: 0 });
@@ -1409,9 +1528,10 @@ export class TableScene {
         L = { sprite, tex, mat, key, basePos: new THREE.Vector3(), opacity: 0, opacityTarget: 1, behind: false };
         this.labels.set(seat.index, L);
       } else if (L.key !== key) {
-        // 手番強調（金枠）や名前変更はテクスチャ差替。opacity を一度沈めてから戻し、クロスフェードにする（Q8）。
+        // 手番強調（金枠）・名前変更・累計失点の更新はテクスチャ差替。opacity を一度沈めてから戻し、
+        // クロスフェードにする（Q8＝スコア更新のさりげない演出も兼ねる・契約20項目3）。
         L.tex.dispose();
-        L.tex = this.makeLabelTexture(seat.name, seat.isCurrent);
+        L.tex = this.makeLabelTexture(seat.name, seat.isCurrent, score);
         L.mat.map = L.tex;
         L.mat.needsUpdate = true;
         L.key = key;
@@ -1481,7 +1601,7 @@ export class TableScene {
     }
   }
 
-  private makeLabelTexture(name: string, current: boolean): THREE.CanvasTexture {
+  private makeLabelTexture(name: string, current: boolean, score: number): THREE.CanvasTexture {
     const W = 256;
     const H = 88;
     const cv = document.createElement('canvas');
@@ -1497,11 +1617,26 @@ export class TableScene {
     ctx.lineWidth = 3;
     ctx.strokeStyle = current ? 'rgba(255,236,170,0.98)' : 'rgba(120,160,210,0.55)';
     ctx.stroke();
-    ctx.fillStyle = current ? '#201603' : '#eef3fa';
-    ctx.font = '700 34px system-ui, "Hiragino Kaku Gothic ProN", sans-serif';
-    ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(ellipsize(ctx, name || '?', W - 44), W / 2, H / 2 + 1);
+    const fam = 'system-ui, "Hiragino Kaku Gothic ProN", sans-serif';
+    // 右側に累計失点（契約20項目3②・タイトルのデザイン言語＝金アクセントと調和）。手番強調中は
+    // 金地に沈むので暗い金で描く。名前は残り幅へ省略表示し、長い名前+点でも崩れない（E3）。
+    const scoreStr = String(score);
+    ctx.textAlign = 'right';
+    ctx.font = `700 30px ${fam}`;
+    const scoreW = ctx.measureText(scoreStr).width;
+    ctx.fillStyle = current ? '#3a2a06' : '#ffd873';
+    ctx.fillText(scoreStr, W - pad - 12, H / 2 + 1);
+    // 名前と点の区切り中黒
+    ctx.fillStyle = current ? 'rgba(32,22,3,0.6)' : 'rgba(200,214,235,0.5)';
+    ctx.font = `700 26px ${fam}`;
+    const sepX = W - pad - 18 - scoreW;
+    ctx.fillText('·', sepX, H / 2);
+    // 名前（左寄せ・区切りの手前まで省略）
+    ctx.textAlign = 'left';
+    ctx.font = `700 34px ${fam}`;
+    ctx.fillStyle = current ? '#201603' : '#eef3fa';
+    ctx.fillText(ellipsize(ctx, name || '?', sepX - (pad + 16)), pad + 14, H / 2 + 1);
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
@@ -1517,24 +1652,49 @@ export class TableScene {
    * - 消えたキーは removing=true（loop がその場フェード）。山札方向へは動かさない（項目3: 吸い込み廃止）。
    */
   private syncBacks(view: PlayerView, now: number, dealing: boolean, deckPos: THREE.Vector3): void {
-    const desired = new Map<string, { pos: THREE.Vector3; quat: THREE.Quaternion; fromDeck: boolean; delay: number }>();
+    const desired = new Map<
+      string,
+      { pos: THREE.Vector3; quat: THREE.Quaternion; fromDeck: boolean; delay: number; card?: Card | null; faceBoth?: boolean }
+    >();
     let dealIdx = 0;
-    for (const seat of view.seats) {
-      if (seat.index === view.youIndex) continue;
-      const prev = this.backSeatCount.get(seat.index);
-      const slots = this.floatHandLayout(seat.index, seat.handCount);
-      slots.forEach((s, k) => {
-        // 他家ツモ検出（項目3/E7）: 既に見えていた席が +1 枚で、その増えた末尾スロットだけを
-        // 山札から飛翔させる。配札・席の可視トグル（ホットシートの youIndex 変化）では飛ばさない。
-        const isDraw = prev !== undefined && seat.handCount === prev + 1 && k === seat.handCount - 1;
-        desired.set(`h:${seat.index}:${k}`, {
-          pos: s.pos,
-          quat: s.quat,
-          fromDeck: dealing || isDraw,
-          delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
+    const reveal = this.demoHands;
+    if (reveal) {
+      // デモ公開モード（契約20項目2）: 自席を含む全席の実手札を表向きで浮かべる。カードごとに
+      // 安定キー（h:席:cardId）で管理し、手札が変わっても正しい絵柄で作り直される（裏向きモードは
+      // スロット番号キーだが、両モードは同一シーンで併用しないためキー空間は衝突しない）。
+      for (const seat of view.seats) {
+        const cards = reveal.get(seat.index) ?? [];
+        const slots = this.floatHandLayout(seat.index, cards.length);
+        cards.forEach((c, k) => {
+          const s = slots[k]!;
+          desired.set(`h:${seat.index}:${cardId(c)}`, {
+            pos: s.pos,
+            quat: s.quat, // 浮遊扇の自然な向きのまま。両面に絵柄を貼る（faceBoth）ので卓のどの側からも表向きに見える
+            fromDeck: dealing,
+            delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
+            card: c,
+            faceBoth: true,
+          });
         });
-      });
-      this.backSeatCount.set(seat.index, seat.handCount);
+      }
+    } else {
+      for (const seat of view.seats) {
+        if (seat.index === view.youIndex) continue;
+        const prev = this.backSeatCount.get(seat.index);
+        const slots = this.floatHandLayout(seat.index, seat.handCount);
+        slots.forEach((s, k) => {
+          // 他家ツモ検出（項目3/E7）: 既に見えていた席が +1 枚で、その増えた末尾スロットだけを
+          // 山札から飛翔させる。配札・席の可視トグル（ホットシートの youIndex 変化）では飛ばさない。
+          const isDraw = prev !== undefined && seat.handCount === prev + 1 && k === seat.handCount - 1;
+          desired.set(`h:${seat.index}:${k}`, {
+            pos: s.pos,
+            quat: s.quat,
+            fromDeck: dealing || isDraw,
+            delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
+          });
+        });
+        this.backSeatCount.set(seat.index, seat.handCount);
+      }
     }
     // 非表示になった席（人数減 / 自席化）の記録は破棄（次の +1 誤検出を防ぐ）。
     for (const idx of [...this.backSeatCount.keys()]) {
@@ -1554,7 +1714,7 @@ export class TableScene {
     for (const [key, t] of desired) {
       const obj = this.backById.get(key);
       if (!obj) {
-        const group = this.buildCard(null);
+        const group = this.buildCard(t.card ?? null, t.faceBoth ?? false); // デモ公開時は実絵柄（両面）、通常は裏向き
         const spawn = t.fromDeck ? deckPos : t.pos;
         group.position.copy(spawn);
         group.quaternion.copy(t.quat);
@@ -1884,6 +2044,14 @@ export class TableScene {
         current: (obj.group.position.toArray() as number[]).map((n: number) => +n.toFixed(2)),
         meldId: obj.meldId ?? null,
       };
+    };
+    // 計測用（契約20項目4）: 静的家具の1メッシュ統合による描画コール削減の before/after を測る。
+    // 呼び出し時にシーンを1回強制描画してから renderer.info.render を読む（hidden ペインで rAF が
+    // 止まっていても確定値が取れる）。postfx を経ないシーン素描画のコール数＝統合効果が素直に出る。
+    (el as unknown as { __renderStats?: () => unknown }).__renderStats = () => {
+      this.renderer.render(this.scene, this.camera);
+      const r = this.renderer.info.render;
+      return { calls: r.calls, triangles: r.triangles, merged: MERGE_FURNITURE };
     };
   }
 
@@ -2288,6 +2456,12 @@ export class TableScene {
     this.backMat.dispose?.();
     for (const m of this.frontMatCache.values()) m.dispose?.();
     this.frontMatCache.clear();
+    // デモ裏面材質は反転テクスチャ（共有module外）を持つので map も明示解放する（E6準拠）。
+    for (const m of this.demoBackMatCache.values()) {
+      m.map?.dispose?.();
+      m.dispose?.();
+    }
+    this.demoBackMatCache.clear();
     // モジュールキャッシュのテクスチャを破棄しクリア（次シーンで再生成される）
     disposeCardTextures();
     disposeFelt();

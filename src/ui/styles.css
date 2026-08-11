@@ -153,6 +153,41 @@ button.danger {
 .topbar .spacer {
   flex: 1;
 }
+/* 自席の累計失点ピル（契約20項目3①）: 金アクセントでヘッダに常時表示。値変化時に bump 演出。 */
+.topbar .pill.score {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: rgba(216, 161, 58, 0.5);
+}
+.topbar .pill.score .lbl {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.topbar .pill.score .val {
+  font-weight: 800;
+  font-size: 15px;
+  color: #ffd873;
+  letter-spacing: 0.02em;
+  min-width: 1ch;
+  text-align: right;
+}
+.topbar .pill.score.bump {
+  animation: score-bump 520ms ease-out;
+}
+@keyframes score-bump {
+  0% {
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(1.18);
+    border-color: rgba(255, 216, 115, 0.95);
+    box-shadow: 0 0 12px rgba(255, 216, 115, 0.5);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
 
 /* ---- 永続コントロール（スコア票/ミュート/視点リセット・項目8） ----
    overlay の作り直しから独立した固定コンテナ。毎 render で DOM が破棄されないため、タップ/クリックが
@@ -1497,7 +1532,8 @@ table.score td.win {
     animation-timing-function: ease;
   }
   .card.drawn,
-  .claim.urgent {
+  .claim.urgent,
+  .topbar .pill.score.bump {
     animation: none;
   }
   button:hover:not(:disabled) {
