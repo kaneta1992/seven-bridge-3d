@@ -134,6 +134,8 @@ export class TableScene {
   private viewYou = 0; // 現手番（=自席）インデックス。場リングの配置に使う。
   // ドラッグ中カードが付け札可能なメルドID集合（項目15b: dropTargetAt のメルド判定をこれに限定）。
   private attachableMelds = new Set<number>();
+  // メルドごとの卓面外接矩形（ゾーン判定用・2026-08-11）。update() の配置時に再構築する。
+  private meldBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number }>();
   private handDragging = false; // 手札 D&D 中はカメラ操作を無視する（項目10）。
 
   // 席名ビルボードラベル（契約05項目2）: Canvas テクスチャの Sprite（常にカメラ正対）。
@@ -459,6 +461,7 @@ export class TableScene {
       meldsBySeat.set(seat, arr);
     }
     let ySeq = 0; // 全メルドカード通し番号（y 段差用）
+    this.meldBounds.clear(); // ゾーン判定用の外接矩形を作り直す（2026-08-11 付け札ヒット改善）
     for (const [seat, melds] of meldsBySeat) {
       const dir = this.seatDir(seat);
       const tangent = new THREE.Vector3(-dir.z, 0, dir.x);
@@ -472,6 +475,7 @@ export class TableScene {
       });
       // 自席（viewYou）は「手札帯より上」へ寄せる自席専用レイアウト（控えめバルジ+段数最小化・項目1a）。
       const layout = layoutSeatMelds(this.seatCount, dir.x, inputs, seat === this.viewYou);
+      const halfW = (Math.max(CARD_W, CARD_H) / 2) * layout.scale;
       for (const slot of layout.slots) {
         const card = orderedById.get(slot.meldId)?.[slot.index];
         if (!card) continue;
@@ -484,6 +488,17 @@ export class TableScene {
           .add(new THREE.Vector3(0, TABLE_TOP_Y + 0.05 + ySeq * 0.006, 0));
         ySeq++;
         this.place(id, card, p, quat, now, 0, deckPos, slot.meldId, layout.scale);
+        // ゾーン判定用にメルドの外接矩形（卓面 x/z）を蓄積。カードメッシュへの厳密レイキャストが
+        // 縮小カードやリング表示とのズレで外れても、矩形内ドロップなら付け札として拾えるようにする。
+        const b = this.meldBounds.get(slot.meldId);
+        if (!b) {
+          this.meldBounds.set(slot.meldId, { minX: p.x - halfW, maxX: p.x + halfW, minZ: p.z - halfW, maxZ: p.z + halfW });
+        } else {
+          b.minX = Math.min(b.minX, p.x - halfW);
+          b.maxX = Math.max(b.maxX, p.x + halfW);
+          b.minZ = Math.min(b.minZ, p.z - halfW);
+          b.maxZ = Math.max(b.maxZ, p.z + halfW);
+        }
       }
     }
 
@@ -763,6 +778,22 @@ export class TableScene {
     const pt = this.raycaster.ray.intersectPlane(this.tablePlane, TMP_HIT);
     if (!pt) return null;
     if (Math.hypot(pt.x, pt.z) > TABLE_R) return null; // 卓外 = 取り消し（E6）
+    // 2.5) ゾーンフォールバック（2026-08-11 ユーザー報告: ポンの666への付け札が「場」判定に化ける）:
+    // カードメッシュへの厳密レイキャストは、縮小されたメルドカードやリング表示との僅かなズレで
+    // 外れることがある。付け札可能メルドの外接矩形（+マージン）内に卓面交点が入っていれば
+    // メルドとして拾う。光るリング＝ゾーンという視覚аффордансとも一致する。
+    {
+      const M = 0.18;
+      let best: { mid: number; d: number } | null = null;
+      for (const [mid, b] of this.meldBounds) {
+        if (!this.attachableMelds.has(mid)) continue;
+        if (pt.x >= b.minX - M && pt.x <= b.maxX + M && pt.z >= b.minZ - M && pt.z <= b.maxZ + M) {
+          const d = Math.hypot(pt.x - (b.minX + b.maxX) / 2, pt.z - (b.minZ + b.maxZ) / 2);
+          if (!best || d < best.d) best = { mid, d };
+        }
+      }
+      if (best) return { kind: 'meld', meldId: best.mid };
+    }
     if (Math.hypot(pt.x - DISCARD_C.x, pt.z - DISCARD_C.z) < DISCARD_R) return { kind: 'discard' };
     return { kind: 'field' };
   }
