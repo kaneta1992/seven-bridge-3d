@@ -231,6 +231,11 @@ export class TableScene {
       opacity: number; // 現在の可視不透明度（Q8: 表示切替・手番強調をクロスフェード）
       opacityTarget: number; // 目標（表示=1 / 非表示=0）
       behind: boolean; // カメラ背面にある（背面投影で正面へ化けるため強制非表示・契約18項目3）
+      current: boolean; // 現手番席か（手番色ワイプの向きを決める・契約21項目7）
+      phase: number; // 手番色ワイプの現在進捗 0..1（0=非手番・1=手番の金）。テクスチャ描画に渡す
+      phaseTarget: number; // ワイプの目標（手番獲得=1 / 手番喪失=0）。高速交代で即差し替え（E3）
+      name: string; // 直近描画に使った名前（ワイプ再描画で必要）
+      score: number; // 直近描画に使った累計失点
     }
   >();
 
@@ -898,11 +903,15 @@ export class TableScene {
     for (let k = 0; k < count; k++) {
       const t = k - (count - 1) / 2;
       const roll = t * 0.12; // 面内ロールで扇状に広げる
+      // Z ファイト対策（契約21項目4）: 旧実装は中央基準の距離 |t| で法線方向(dir)の段差を付けていたため、
+      // 中央対称の隣接札（例: t=-0.5 と +0.5）が同一深度に載って重なり Z ファイトした。深度段差を
+      // 「左から右への単調順」= t（k に単調）にして、隣接札が必ず異なる深度に並ぶようにする。カードは
+      // ほぼ立っている（tilt≈直立）ので法線は概ね水平(dir)方向＝dir へ単調に押すと深度が確実に分離する。
       const p = anchor
         .clone()
         .addScaledVector(tangent, t * spacing)
-        .add(new THREE.Vector3(0, -Math.abs(t) * 0.02, 0)) // 端ほど僅かに下げ弧を描く
-        .addScaledVector(dir, Math.abs(t) * 0.02); // 端ほど僅かに外へ膨らむ
+        .add(new THREE.Vector3(0, -Math.abs(t) * 0.02, 0)) // 端ほど僅かに下げ弧を描く（面内・深度には効かない）
+        .addScaledVector(dir, t * 0.016); // 左→右の単調な深度段差（隣接札を確実に前後へ分離＝Zファイト解消）
       const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2 + tilt, -a + Math.PI / 2, roll, 'YXZ'));
       out.push({ pos: p, quat: q });
     }
@@ -1515,31 +1524,46 @@ export class TableScene {
     for (const row of view.scores) for (let i = 0; i < n; i++) totals[i]! += row[i] ?? 0;
     for (const seat of view.seats) {
       const score = totals[seat.index] ?? 0;
-      const key = `${seat.name}|${seat.isCurrent ? 1 : 0}|${score}`;
+      // 手番強調(isCurrent)はキーから外す（契約21項目7）: 名前/失点の変化はテクスチャ差替（クロスフェード）、
+      // 手番色は phase を左→右に流す 2 色ワイプで別途アニメする。両者を混ぜると差替のたびにワイプが飛ぶ。
+      const key = `${seat.name}|${score}`;
       let L = this.labels.get(seat.index);
       if (!L) {
-        const tex = this.makeLabelTexture(seat.name, seat.isCurrent, score);
+        const phase = seat.isCurrent ? 1 : 0;
+        const tex = this.makeLabelTexture(seat.name, score, phase);
         // 席名ラベルは手札やカードより常に優先して見える（U2）: depthTest=false + 高い renderOrder で
         // 浮遊手札の裏面に隠れず最前面へ描く。可読性が勝つ。
         const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, opacity: 0 });
         const sprite = new THREE.Sprite(mat);
         sprite.renderOrder = 60;
         this.scene.add(sprite);
-        L = { sprite, tex, mat, key, basePos: new THREE.Vector3(), opacity: 0, opacityTarget: 1, behind: false };
+        L = {
+          sprite, tex, mat, key, basePos: new THREE.Vector3(), opacity: 0, opacityTarget: 1, behind: false,
+          current: seat.isCurrent, phase, phaseTarget: phase, name: seat.name, score,
+        };
         this.labels.set(seat.index, L);
       } else if (L.key !== key) {
-        // 手番強調（金枠）・名前変更・累計失点の更新はテクスチャ差替。opacity を一度沈めてから戻し、
-        // クロスフェードにする（Q8＝スコア更新のさりげない演出も兼ねる・契約20項目3）。
+        // 名前変更・累計失点の更新はテクスチャ差替。opacity を一度沈めてから戻しクロスフェード（Q8）。
+        // 手番色ワイプの現在 phase を保って描き直す（差替中もワイプ状態が保たれる）。
         L.tex.dispose();
-        L.tex = this.makeLabelTexture(seat.name, seat.isCurrent, score);
+        L.name = seat.name;
+        L.score = score;
+        L.tex = this.makeLabelTexture(seat.name, score, L.phase);
         L.mat.map = L.tex;
         L.mat.needsUpdate = true;
         L.key = key;
         L.opacity = Math.min(L.opacity, 0.25);
       }
-      // 自席ラベルは非表示（項目5: 自分の席は画面下の扇形手札で自明）。フェードで消す（Q8）。
-      // ホットシートでは youIndex が手番ごとに変わるため、手番席のラベルが隠れる（意図どおり）。
-      if (seat.index === view.youIndex) {
+      // 手番の獲得/喪失を検出して 2 色ワイプを開始（契約21項目7）。高速交代（鳴きジャンプ）でも
+      // phaseTarget を張り替えるだけで進行中ワイプが新しい目標へ滑らかに向かう（中断→新ワイプ・E3）。
+      if (seat.isCurrent !== L.current) {
+        L.current = seat.isCurrent;
+        L.phaseTarget = seat.isCurrent ? 1 : 0;
+      }
+      // 自席ラベルは非表示（自分の席は画面下の扇形手札で自明）。ただしデモ(cinematic)では全席を常時表示し、
+      // 実対局と同じ手番色（金強調）を見せる（契約21項目6: デモで手番席のプレートが消える不具合の修正）。
+      // ホットシートでは youIndex が手番ごとに変わるため、手番席のラベルが隠れる（実対局では意図どおり）。
+      if (!this.cinematic && seat.index === view.youIndex) {
         L.opacityTarget = 0;
         continue;
       }
@@ -1558,11 +1582,28 @@ export class TableScene {
     this.updateLabelFacing();
   }
 
-  /** 席名ラベルの不透明度を目標へ追従させる（Q8: 表示切替・手番強調のクロスフェード）。loop から毎フレーム。 */
-  private stepLabelFades(k: number): boolean {
+  /** 席名ラベルの不透明度＋手番色ワイプ(契約21項目7)を目標へ追従させる。loop から毎フレーム（dt=経過秒）。 */
+  private stepLabelFades(k: number, dt: number): boolean {
     let busy = false;
     const ko = Math.min(1, k * 1.4);
+    // 手番色ワイプは「時間基準」で一定速度に進める（左→右へ約 0.55s で塗り切る＝はっきり読める 2 色ワイプ）。
+    // exp イージング係数 k で進めると数フレームで終わり瞬間切替に見えるため dt で線形に進める（実測是正）。
+    // reduced-motion（quality.cameraShake=false）では即座に切り替える（E6・派手な走査を控える）。
+    const WIPE_DUR = 0.55;
+    const step = this.quality.cameraShake ? Math.min(1, dt / WIPE_DUR) : 1;
     for (const L of this.labels.values()) {
+      // 手番色ワイプ: phase を phaseTarget へ一定速度で寄せ、変化があればテクスチャを描き直す。
+      // 手番の高速交代（鳴きジャンプ）では phaseTarget が張り替わり、進行中ワイプが新目標へ折り返す（E3）。
+      if (L.phase !== L.phaseTarget) {
+        const dir = Math.sign(L.phaseTarget - L.phase);
+        L.phase += dir * step;
+        if ((dir > 0 && L.phase > L.phaseTarget) || (dir < 0 && L.phase < L.phaseTarget)) L.phase = L.phaseTarget;
+        L.tex.dispose();
+        L.tex = this.makeLabelTexture(L.name, L.score, L.phase);
+        L.mat.map = L.tex;
+        L.mat.needsUpdate = true;
+        busy = true;
+      }
       // カメラ背面のラベルは即 0 へ（背面投影で正面に化けるのを防ぐため target を落とす・契約18項目3）。
       const target = L.behind ? 0 : L.opacityTarget;
       if (Math.abs(L.opacity - target) > 0.004) {
@@ -1601,7 +1642,14 @@ export class TableScene {
     }
   }
 
-  private makeLabelTexture(name: string, current: boolean, score: number): THREE.CanvasTexture {
+  /**
+   * 席名ラベルのテクスチャを生成する。phase（0..1・契約21項目7）で手番色の 2 色ワイプを描く:
+   *  - phase=0: 非手番（暗紺プレート・淡色文字）。phase=1: 手番（金プレート・墨文字）。
+   *  - 0<phase<1: 手番の金プレートを左→右にワイプで塗り進め（clip 幅 = W*phase）、その先端に
+   *    「1色目」= 生成り（paper）の細い走査帯を置く。金が塗り切った所は手番の文字色、まだの所は
+   *    非手番の文字色で読めるよう、領域ごとに clip して二重描画する（どの進捗でも可読・NieR 風の抑制的演出）。
+   */
+  private makeLabelTexture(name: string, score: number, phase = 0): THREE.CanvasTexture {
     const W = 256;
     const H = 88;
     const cv = document.createElement('canvas');
@@ -1611,32 +1659,58 @@ export class TableScene {
     ctx.clearRect(0, 0, W, H);
     const pad = 8;
     const r = 20;
-    roundRectPath(ctx, pad, pad, W - 2 * pad, H - 2 * pad, r);
-    ctx.fillStyle = current ? 'rgba(216,161,58,0.94)' : 'rgba(14,22,33,0.86)';
-    ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = current ? 'rgba(255,236,170,0.98)' : 'rgba(120,160,210,0.55)';
-    ctx.stroke();
-    ctx.textBaseline = 'middle';
     const fam = 'system-ui, "Hiragino Kaku Gothic ProN", sans-serif';
-    // 右側に累計失点（契約20項目3②・タイトルのデザイン言語＝金アクセントと調和）。手番強調中は
-    // 金地に沈むので暗い金で描く。名前は残り幅へ省略表示し、長い名前+点でも崩れない（E3）。
     const scoreStr = String(score);
-    ctx.textAlign = 'right';
-    ctx.font = `700 30px ${fam}`;
-    const scoreW = ctx.measureText(scoreStr).width;
-    ctx.fillStyle = current ? '#3a2a06' : '#ffd873';
-    ctx.fillText(scoreStr, W - pad - 12, H / 2 + 1);
-    // 名前と点の区切り中黒
-    ctx.fillStyle = current ? 'rgba(32,22,3,0.6)' : 'rgba(200,214,235,0.5)';
-    ctx.font = `700 26px ${fam}`;
-    const sepX = W - pad - 18 - scoreW;
-    ctx.fillText('·', sepX, H / 2);
-    // 名前（左寄せ・区切りの手前まで省略）
-    ctx.textAlign = 'left';
-    ctx.font = `700 34px ${fam}`;
-    ctx.fillStyle = current ? '#201603' : '#eef3fa';
-    ctx.fillText(ellipsize(ctx, name || '?', sepX - (pad + 16)), pad + 14, H / 2 + 1);
+
+    // 1 枚のプレートを描くヘルパ（cur=手番の金配色か）。text 色は cur で切替。
+    const drawPlate = (cur: boolean): void => {
+      roundRectPath(ctx, pad, pad, W - 2 * pad, H - 2 * pad, r);
+      ctx.fillStyle = cur ? 'rgba(216,161,58,0.94)' : 'rgba(14,22,33,0.86)';
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = cur ? 'rgba(255,236,170,0.98)' : 'rgba(120,160,210,0.55)';
+      ctx.stroke();
+      ctx.textBaseline = 'middle';
+      // 右: 累計失点。
+      ctx.textAlign = 'right';
+      ctx.font = `700 30px ${fam}`;
+      const scoreW = ctx.measureText(scoreStr).width;
+      ctx.fillStyle = cur ? '#3a2a06' : '#ffd873';
+      ctx.fillText(scoreStr, W - pad - 12, H / 2 + 1);
+      // 区切り中黒。
+      ctx.fillStyle = cur ? 'rgba(32,22,3,0.6)' : 'rgba(200,214,235,0.5)';
+      ctx.font = `700 26px ${fam}`;
+      const sepX = W - pad - 18 - scoreW;
+      ctx.fillText('·', sepX, H / 2);
+      // 左: 名前（区切り手前まで省略）。
+      ctx.textAlign = 'left';
+      ctx.font = `700 34px ${fam}`;
+      ctx.fillStyle = cur ? '#201603' : '#eef3fa';
+      ctx.fillText(ellipsize(ctx, name || '?', sepX - (pad + 16)), pad + 14, H / 2 + 1);
+    };
+
+    if (phase <= 0.001) {
+      drawPlate(false);
+    } else if (phase >= 0.999) {
+      drawPlate(true);
+    } else {
+      // 非手番プレートを土台に描き、左→右のワイプ幅 edge までを手番プレートで上書き（clip）。
+      drawPlate(false);
+      const edge = pad + (W - 2 * pad) * phase;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, edge, H);
+      ctx.clip();
+      drawPlate(true);
+      ctx.restore();
+      // 先端の「1色目」= 生成りの細い走査帯（金の到達点を先導する上品な光の線）。
+      const bandW = 10;
+      const grad = ctx.createLinearGradient(edge - bandW, 0, edge + 2, 0);
+      grad.addColorStop(0, 'rgba(233,228,214,0)');
+      grad.addColorStop(1, 'rgba(245,240,224,0.92)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(edge - bandW, pad, bandW + 2, H - 2 * pad);
+    }
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
@@ -1665,17 +1739,26 @@ export class TableScene {
       for (const seat of view.seats) {
         const cards = reveal.get(seat.index) ?? [];
         const slots = this.floatHandLayout(seat.index, cards.length);
+        // デモのツモ演出（契約21項目10）: 通常インゲームと同じ「山札→手札の飛翔」機構(fromDeck)へ統合する。
+        // 席の手札が +1 枚になったフレームでは、新規に現れたカード（backById 未登録）を山札から飛ばす。
+        // 席の可視トグルや公開/付け札での増減は +1 枚の条件で誤検出しない（非公開モードの isDraw と同型）。
+        const prev = this.backSeatCount.get(seat.index);
+        const isDraw = prev !== undefined && cards.length === prev + 1;
         cards.forEach((c, k) => {
           const s = slots[k]!;
-          desired.set(`h:${seat.index}:${cardId(c)}`, {
+          const key = `h:${seat.index}:${cardId(c)}`;
+          // ツモ札 = 増えた1枚（既存キーには無い新規カード）。fromDeck で山札位置からの飛翔になる。
+          const drawFly = isDraw && !this.backById.has(key);
+          desired.set(key, {
             pos: s.pos,
             quat: s.quat, // 浮遊扇の自然な向きのまま。両面に絵柄を貼る（faceBoth）ので卓のどの側からも表向きに見える
-            fromDeck: dealing,
+            fromDeck: dealing || drawFly,
             delay: dealing ? dealIdx++ * DEAL_STEP_MS : 0,
             card: c,
             faceBoth: true,
           });
         });
+        this.backSeatCount.set(seat.index, cards.length);
       }
     } else {
       for (const seat of view.seats) {
@@ -1696,9 +1779,13 @@ export class TableScene {
         this.backSeatCount.set(seat.index, seat.handCount);
       }
     }
-    // 非表示になった席（人数減 / 自席化）の記録は破棄（次の +1 誤検出を防ぐ）。
+    // 非表示になった席（人数減 / 自席化）の記録は破棄（次の +1 誤検出を防ぐ）。デモ公開(reveal)では
+    // 自席も含め全席が浮遊表示されるため、自席除外はせず「view に居ない席」だけを破棄する（項目10）。
     for (const idx of [...this.backSeatCount.keys()]) {
-      if (!view.seats.some((s) => s.index === idx && idx !== view.youIndex)) this.backSeatCount.delete(idx);
+      const present = reveal
+        ? view.seats.some((s) => s.index === idx)
+        : view.seats.some((s) => s.index === idx && idx !== view.youIndex);
+      if (!present) this.backSeatCount.delete(idx);
     }
     // 山札: 高さ＝実枚数連動（項目4・E1）。0 枚でキーが無くなり山札は消える。
     const deckShown = Math.min(view.deckCount, 14);
@@ -2208,7 +2295,7 @@ export class TableScene {
 
     // 席名ラベルの前後判定（カメラのイージングに追従・背面は隠す・項目3）+ 不透明度クロスフェード（Q8）
     this.updateLabelFacing();
-    if (this.stepLabelFades(k)) fxBusy = true;
+    if (this.stepLabelFades(k, dt)) fxBusy = true;
     // カメラが手前に回り込んだ他家の空中手札を隠す（契約14項目4）。カメラのイージングに毎フレーム追従。
     this.updateHandOcclusion();
 

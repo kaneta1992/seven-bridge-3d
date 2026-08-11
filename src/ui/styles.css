@@ -769,71 +769,91 @@ table.score td.win {
   pointer-events: none;
   overflow: hidden;
 }
+/* ---- 大型コールアウト（NieR 風ミニマル・契約21項目8） ----
+   タイトルと同じデザイン言語: 細罫線・墨/生成り・広い字間・抑制的な出入り。色ベタや太い縁取りは廃し、
+   派手さは「罫線が横に伸びる」「字間トラッキング」「文字のマスクワイプ」で上品に表現する。
+   変種(pon/chi/win/…)は罫線と文字のアクセント色（currentColor）だけを控えめに替える。 */
 .callout {
   position: absolute;
   left: 50%;
   top: 40%;
   transform: translate(-50%, -50%);
-  font-weight: 900;
-  font-size: clamp(48px, 15vw, 132px);
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.35), 0 10px 34px rgba(0, 0, 0, 0.6);
-  animation: callout-in 0.42s cubic-bezier(0.16, 1.1, 0.3, 1.6) both;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(8px, 1.6vw, 14px);
+  color: #d9b25a; /* 既定アクセント=金（currentColor を罫線に流用） */
+  animation: callout-fade 0.44s ease both;
+}
+.callout .rule {
+  height: 1px;
+  width: min(52vw, 420px);
+  max-width: 92vw;
+  background: linear-gradient(90deg, transparent, currentColor, transparent);
+  opacity: 0.85;
+  transform: scaleX(0);
+  animation: callout-rule 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.callout .rule.bot {
+  animation-delay: 0.04s;
 }
 .callout .txt {
   display: inline-block;
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.28);
+  font-weight: 300; /* 細身の字（墨の落ち着き） */
+  font-size: clamp(40px, 12vw, 104px);
+  line-height: 1;
+  letter-spacing: 0.3em;
+  padding-left: 0.3em; /* 末尾字間の視覚的な中央合わせ */
+  white-space: nowrap;
+  color: #efe9db; /* 生成り（文字は白すぎない紙色） */
+  text-shadow: 0 2px 26px rgba(0, 0, 0, 0.66);
+  /* マスクワイプ: 左→右に現れる（NieR の走査的な出）。 */
+  -webkit-mask-image: linear-gradient(90deg, #000 0 100%);
+  mask-image: linear-gradient(90deg, #000 0 100%);
+  animation: callout-wipe 0.6s cubic-bezier(0.3, 0.7, 0.2, 1) both;
 }
-.callout.pon .txt {
-  background-image: linear-gradient(180deg, #ffd27a, #ff6a3d);
-}
-.callout.chi .txt {
-  background-image: linear-gradient(180deg, #bfe4ff, #4d9bff);
-}
-.callout.meld .txt {
-  background-image: linear-gradient(180deg, #fff0b0, #e7b955);
-}
-.callout.win .txt {
-  background-image: linear-gradient(180deg, #fff6c0, #ffca3a 55%, #ff8a3d);
-  font-size: 1.05em;
-}
-.callout.go .txt {
-  background-image: linear-gradient(180deg, #ffffff, #b8f2d4 55%, #37b97e);
-}
-.callout.draw-round .txt {
-  background-image: linear-gradient(180deg, #d6e2f0, #93a7bd);
-}
+.callout.pon { color: #e0b452; }
+.callout.chi { color: #7fb4e6; }
+.callout.meld { color: #d9b25a; }
+.callout.win { color: #f2d06a; }
+.callout.win .txt { font-size: clamp(46px, 13vw, 116px); color: #f6efd6; }
+.callout.go { color: #74c79c; }
+.callout.draw-round { color: #9fb0c2; }
 .callout.leaving {
-  animation: callout-out 0.3s ease-in forwards;
+  animation: callout-out 0.34s ease-in forwards;
 }
-@keyframes callout-in {
+@keyframes callout-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes callout-rule {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 0.85; }
+}
+@keyframes callout-wipe {
   0% {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(2.4) rotate(-6deg);
-    filter: blur(6px);
+    letter-spacing: 0.5em;
+    -webkit-mask-position: 120% 0;
+    mask-position: 120% 0;
+    -webkit-mask-size: 240% 100%;
+    mask-size: 240% 100%;
   }
-  55% {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(0.92) rotate(1.5deg);
-    filter: blur(0);
-  }
-  75% {
-    transform: translate(-50%, -50%) scale(1.06) rotate(-1deg);
-  }
+  60% { opacity: 1; }
   100% {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(1) rotate(0);
+    letter-spacing: 0.3em;
+    -webkit-mask-position: 0 0;
+    mask-position: 0 0;
+    -webkit-mask-size: 240% 100%;
+    mask-size: 240% 100%;
   }
 }
 @keyframes callout-out {
   to {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(1.3);
-    filter: blur(4px);
+    transform: translate(-50%, -60%);
+    filter: blur(2px);
   }
 }
 
@@ -1392,7 +1412,8 @@ table.score td.win {
   flex-direction: column;
   align-items: center;
   gap: 14px;
-  padding: 34px 42px;
+  padding: clamp(18px, 5vw, 34px) clamp(14px, 6vw, 42px); /* 狭幅では左右余白を詰めロゴ 1 行の幅を確保（項目2） */
+  max-width: 100%;
   text-align: center;
 }
 .hero-suits {
@@ -1408,13 +1429,19 @@ table.score td.win {
 .hero-logo {
   display: flex;
   align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap; /* 極狭幅では「3D」を次行へ落とす（単語内改行はしない・契約21項目2） */
   gap: 0.28em;
   color: #efe9db;
+  max-width: 100%;
 }
 .hero-logo .main {
-  font-size: clamp(34px, 7.6vw, 82px);
+  /* 「セブンブリッジ」は単語内で折り返さない（契約21項目2: スマホ幅で「セブンブリ／ッジ」分断を禁止）。
+     幅に応じて字サイズ・字間を詰め、どの幅でも 1 行の美しいタイポに収める。 */
+  white-space: nowrap;
+  font-size: clamp(26px, 8vw, 82px);
   font-weight: 800;
-  letter-spacing: 0.16em;
+  letter-spacing: clamp(0.05em, 1.1vw, 0.16em);
   text-shadow: 0 2px 30px rgba(0, 0, 0, 0.6), 0 0 1px rgba(255, 255, 255, 0.4);
 }
 .hero-logo .sub3d {
@@ -1517,9 +1544,12 @@ table.score td.win {
 .screen-wipe.cover {
   transform: translateX(0);
 }
+/* 開き（契約21項目3）: 覆った黒幕を「入ってきたのと反対方向」へ抜いて画面を開く。cover は左→右に
+   覆い、reveal は右→左へ退いて新画面を右側から出す＝閉じ／開きが対称の 2 拍子になる（ぱっと切替の解消）。
+   ::before の金罫は退き際の先端（右辺）に残り、開きの走査線として働く。 */
 .screen-wipe.reveal {
-  transform: translateX(100%);
-  transition: transform 0.44s cubic-bezier(0.7, 0, 0.3, 1);
+  transform: translateX(-100%);
+  transition: transform 0.46s cubic-bezier(0.7, 0, 0.3, 1);
 }
 
 /* アクセシビリティ: 動きの抑制設定を尊重（派手なアニメを穏やかに）。E6 */
@@ -1530,6 +1560,17 @@ table.score td.win {
   .callout,
   .callout.leaving {
     animation-timing-function: ease;
+  }
+  /* NieR コールアウトの罫線アニメ/マスクワイプ/字間トラッキングは控える（即時表示・E6）。 */
+  .callout .rule {
+    animation: none;
+    transform: scaleX(1);
+  }
+  .callout .txt {
+    animation: none;
+    letter-spacing: 0.3em;
+    -webkit-mask-image: none;
+    mask-image: none;
   }
   .card.drawn,
   .claim.urgent,

@@ -30,8 +30,12 @@ export class Callouts {
       return;
     }
     this.active = true;
+    // NieR 風の抑制的な意匠（契約21項目8）: 細罫線を上下に走らせ、字間を広げた墨/生成りの文字を
+    // マスクワイプで出す。派手さは色ベタでなく「罫線アニメ・字間トラッキング・マスクワイプ」で表す。
     const node = el('div', { class: `callout ${item.variant}` }, [
+      el('span', { class: 'rule top' }),
       el('span', { class: 'txt', text: item.text }),
+      el('span', { class: 'rule bot' }),
     ]);
     this.layer.append(node);
     // アニメーション終了で除去し、次をわずかな間を置いて表示

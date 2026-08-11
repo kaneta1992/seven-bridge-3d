@@ -96,22 +96,36 @@ export function layoutSeatMelds(
   const rc = centerKeepout(dirX);
   const sectorHalf = sectorHalfAngle(seatCount);
 
-  // 探索順。各試行内で SCALE_MIN を必ず末尾で試す（0.06 刻みが割り切れず MIN を飛ばすのを防ぐ）。
-  // メルド単位の行詰め（flow）は内側行から順に埋める。
-  //  - 自席: 段数を 1,2,… と増やしながら「押し出し禁止(preferInner)で内側へ寄せる」。少ない段で収まる
-  //    ほど内側にクラスタし付け札しやすい（契約12項目1a・段数最小化）。段を増やしても内側に収まらない
-  //    長いメルドは最後に一般配置(preferInner=false=外周押し出し可)へフォールバックし 1 行で置く。
-  //  - 他席: 一般配置のみ。長いメルドを幅の足りる外周行へ押し出す（連続半径）。
-  const attempts: { preferInner: boolean; rowCap: number }[] = selfSeat
-    ? [
-        ...[1, 2, 3, 4, 5, 6, 7, 8].map((rowCap) => ({ preferInner: true, rowCap })),
-        { preferInner: false, rowCap: Infinity },
-      ]
-    : [{ preferInner: false, rowCap: Infinity }];
-  for (const a of attempts) {
+  // 探索方針（契約21項目1: 「別メルドの改行を優先→無理ならスケール」）。
+  // 旧実装は自席で段数を最小化するため 1 段へ詰めてスケールを最小(0.43)まで落とし、複数メルドが
+  // 極端に小さく潰れていた（=「1 行に収まらないと即スケール縮小」）。新実装はスケールを外側ループ＝
+  // **大きいスケールを優先**し、その中で段数(rowCap)を 1,2,… と増やして別メルドを次段へ改行する。
+  // 同一メルドが行を跨がない不変条件（R19/契約18項目4）は flow が保証する（メルドは単位で1行に載る）。
+  //  - 自席: 付け札のため押し出し禁止(preferInner)で内側へ寄せる。同一スケールでは段数最小＝内側
+  //    クラスタを優先（契約12項目1a）。ただし段を増やしても内側に入らない長いメルド（13枚等）は、
+  //    スケールを段階的に下げても内側に収まらないため、最後に一般配置へフォールバックする。
+  //  - 他席: 一般配置のみ（スケール外側ループ・flow が rowCap=∞ で自由に改行/外周押し出し）。
+  if (selfSeat) {
     for (let k = 0; ; k++) {
       const s = Math.max(SCALE_MIN, round2(SCALE_MAX - k * SCALE_STEP));
-      const slots = flow(units, s, rc, sectorHalf, false, a.preferInner, a.rowCap);
+      // 大きいスケールほど優先。同一スケール内では段数を増やして別メルドを改行（内寄せ・押し出し禁止）。
+      for (const rowCap of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        const slots = flow(units, s, rc, sectorHalf, false, true, rowCap);
+        if (slots) return { scale: s, slots, overflow: false };
+      }
+      if (s <= SCALE_MIN + 1e-9) break;
+    }
+    // 内側(押し出し禁止)へどのスケールでも収まらない長いメルドは一般配置へフォールバック（1段・連続半径）。
+    for (let k = 0; ; k++) {
+      const s = Math.max(SCALE_MIN, round2(SCALE_MAX - k * SCALE_STEP));
+      const slots = flow(units, s, rc, sectorHalf, false, false, Infinity);
+      if (slots) return { scale: s, slots, overflow: false };
+      if (s <= SCALE_MIN + 1e-9) break;
+    }
+  } else {
+    for (let k = 0; ; k++) {
+      const s = Math.max(SCALE_MIN, round2(SCALE_MAX - k * SCALE_STEP));
+      const slots = flow(units, s, rc, sectorHalf, false, false, Infinity);
       if (slots) return { scale: s, slots, overflow: false };
       if (s <= SCALE_MIN + 1e-9) break;
     }

@@ -300,12 +300,51 @@ describe('自席メルドの可視域配置（契約12 項目1a）', () => {
   });
 
   it('段数最小化が効くケースは自席が非自席より確実に内側へ寄る（縮小で内側クラスタ）', () => {
-    // 内側 1 段にまとめられるケースは自席が縮小して内寄せ＝厳密に内側。
-    expect(selfMaxU(4, 0, melds([3, 3]))).toBeLessThan(nonMaxU(4, 0, melds([3, 3])));
+    // 単独メルドは改行の余地が無いため、自席は縮小して内寄せ＝厳密に内側（付け札可視域を確保）。
+    // 契約21項目1: 複数メルドは「別メルドの改行を優先」するため必ずしも縮小内寄せしない（下のテスト参照）。
     expect(selfMaxU(6, 0, melds([3]))).toBeLessThan(nonMaxU(6, 0, melds([3])));
     expect(selfMaxU(6, 1, melds([3]))).toBeLessThan(nonMaxU(6, 1, melds([3])));
     // 6人狭セクタで [3,3,3] は分割禁止（項目4）のため最小 2 段が限界＝自席でも非自席と同等（内側以下）。
     // no-split 導入前は分割で更に詰められたが、分割禁止が優先される（自席が非自席を上回らないことは保証）。
     expect(selfMaxU(6, 1, melds([3, 3, 3]))).toBeLessThanOrEqual(nonMaxU(6, 1, melds([3, 3, 3])) + 1e-9);
+  });
+});
+
+// 契約21項目1: 「別メルドの改行を優先→無理ならスケール」。旧実装は自席で複数メルドを 1 段へ詰めて
+// スケールを最小(0.43)まで落とし極端に小さく潰していた。新実装は大きいスケールを優先し、別メルドを
+// 次段へ改行する（同一メルドは1段の不変条件は維持）。ここではその改善を数値で固定する。
+describe('メルド配置は改行優先→スケールは最後（契約21項目1）', () => {
+  const layout = (n: number, seat: number, ms: MeldInput[], self: boolean) => {
+    const dir = seatDir(seat, n);
+    return layoutSeatMelds(n, dir.x, ms, self);
+  };
+  const rowCount = (n: number, seat: number, ms: MeldInput[], self: boolean): number =>
+    new Set(layout(n, seat, ms, self).slots.map((s) => Math.round(s.u * 1000))).size;
+
+  it('自席の複数メルドは 1 段へ詰めて縮小せず、基準スケールのまま次段へ改行する', () => {
+    // 旧: 4人自席 [3,3] は scale 0.43 の 1 段（潰れ）。新: 基準 0.85 のまま 2 段へ改行。
+    const r = layout(4, 0, melds([3, 3]), true);
+    expect(r.scale).toBe(0.85);
+    expect(rowCount(4, 0, melds([3, 3]), true)).toBe(2);
+    // 3人自席 [3,3,3] も同様に基準スケールで改行（旧は 0.49 の 1 段）。
+    expect(layout(3, 0, melds([3, 3, 3]), true).scale).toBe(0.85);
+  });
+
+  it('改行で収まる限りスケールは非自席と同等以上（自席が非自席より小さく潰れない）', () => {
+    const cases: [number, number, number[]][] = [
+      [4, 0, [3, 3]], [4, 1, [3, 3, 3]], [3, 0, [3, 3, 3]], [6, 1, [3, 3, 3]],
+    ];
+    for (const [n, s, arr] of cases)
+      expect(layout(n, s, melds(arr), true).scale, `self>=non scale ${n}p seat${s} [${arr}]`).toBeGreaterThanOrEqual(
+        layout(n, s, melds(arr), false).scale - 1e-9,
+      );
+  });
+
+  it('改行してもスケールを優先する（段数が増えてもカードを潰さない）', () => {
+    // 段数を増やしてでも基準スケールを保つ＝可読性優先（同一メルドは1段の不変条件は別テストで担保）。
+    const r = layout(4, 1, melds([3, 3, 3]), true);
+    expect(r.scale).toBe(0.85);
+    expect(rowCount(4, 1, melds([3, 3, 3]), true)).toBeGreaterThanOrEqual(2);
+    expect(r.overflow).toBe(false);
   });
 });
