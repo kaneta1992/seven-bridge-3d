@@ -12,7 +12,7 @@ import { MODELS, INSTANCES, FLOOR_Y } from './room-layout.mjs';
 
 const SRC = 'assets-src/meshy-room';
 const OUT = 'public/models/room-furniture.glb';
-const TILE = 1024;
+const TILE = 512; // 契約33: iPhone(iOS Safari)のメモリ上限対策 — 展開後255MB→64MB。ユーザー裁定: 品質より軽さ優先で半分解像度
 const GRID = 4; // 4x4 = 16 タイル（テクスチャ12 + 予備）
 const ATLAS = TILE * GRID;
 const PAD = 6 / TILE; // タイル内インセット（ミップでの隣タイル滲み対策）
