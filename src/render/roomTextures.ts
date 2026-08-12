@@ -28,8 +28,8 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
   const S = 1024;
   const rows = 6; // 1タイル6枚 → repeat 5 で板幅 0.6m（契約31: 大きな板で床の情報が読める距離を伸ばす）
   const rh = S / rows;
-  // 契約31: のっぺり解消の再強化 — 明度を一段上げ、板同士の色差（コントラスト）を拡大
-  const base = ['#6d5339', '#5c452e', '#7a6444', '#55402a', '#685039', '#7f6a48'];
+  // 契約31→32: のっぺり解消 — アンビエント光だけでも板が読めるよう、壁と同等の明度まで引き上げ
+  const base = ['#8a6a49', '#755839', '#997e57', '#6b5136', '#846849', '#a08a60'];
   interface Painter {
     plank(x: number, y: number, len: number, colIdx: number, r01: number): void;
     grain(x0: number, y0: number, x1: number, y1: number, w: number, k: number): void;
@@ -61,7 +61,7 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
   };
   // ---- カラー ----
   const [cc, cg] = canvas(S);
-  cg.fillStyle = '#4e3a28';
+  cg.fillStyle = '#6b5136';
   cg.fillRect(0, 0, S, S);
   layout({
     plank: (x, y, len, ci, warp) => {
@@ -287,6 +287,51 @@ export function makeCeilingWood(): THREE.CanvasTexture {
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping ?? 1000;
   t.repeat.set(4, 4);
+  t.colorSpace = THREE.SRGBColorSpace ?? 'srgb';
+  return t;
+}
+
+/** 接地影: 放射グラデーションの黒ブロブ（家具の下に敷くフェイクAO・契約32）。 */
+export function makeShadowBlob(): THREE.CanvasTexture {
+  const S = 256;
+  const [c, g] = canvas(S);
+  const grad = g.createRadialGradient(S / 2, S / 2, S * 0.08, S / 2, S / 2, S * 0.5);
+  grad.addColorStop(0, 'rgba(0,0,0,0.28)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,0.14)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, S, S);
+  return new THREE.CanvasTexture(c);
+}
+
+/** 長方形ラグ: ストライプ+ボーダーの北欧風（ソファゾーン用・契約32）。 */
+export function makeRectRug(): THREE.CanvasTexture {
+  const S = 1024;
+  const [c, g] = canvas(S);
+  // 暖色照明下でも床と分離して見える、クリーム×テラコッタの高コントラスト柄（青系は泥色に転ぶ）
+  g.fillStyle = '#b3a184';
+  g.fillRect(0, 0, S, S);
+  const stripes = ['#d9c9a8', '#8a5a44', '#e8dcc0', '#5b7a72'];
+  for (let y = 60, i = 0; y < S - 60; y += 88, i++) {
+    g.fillStyle = stripes[i % stripes.length]!;
+    g.fillRect(60, y, S - 120, 56);
+  }
+  // ボーダーと房
+  g.strokeStyle = '#f2ead8';
+  g.lineWidth = 16;
+  g.strokeRect(36, 36, S - 72, S - 72);
+  g.fillStyle = '#f2ead8';
+  for (let x = 24; x < S - 12; x += 40) {
+    g.fillRect(x, 4, 14, 22);
+    g.fillRect(x, S - 26, 14, 22);
+  }
+  // 織りノイズ
+  for (let i = 0; i < 2600; i++) {
+    g.fillStyle = i % 2 ? 'rgba(255,250,240,0.05)' : 'rgba(10,15,20,0.06)';
+    g.fillRect(Math.random() * S, Math.random() * S, 2, 2);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 4;
   t.colorSpace = THREE.SRGBColorSpace ?? 'srgb';
   return t;
 }

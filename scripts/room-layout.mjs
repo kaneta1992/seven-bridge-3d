@@ -120,6 +120,11 @@ export const INSTANCES = [
   { model: 'wallclock', x: 8.87, z: 0.6, yaw: -90, yOff: 2.9 }, // +x壁・コンソールの上
   { model: 'wallshelf', x: -8.75, z: -4.9, yaw: 90, yOff: 2.7 }, // 複製・-x壁
   { model: 'wallshelf', x: 8.8, z: -5.9, yaw: -90, yOff: 2.7, scale: 0.9 }, // 複製・+x壁
+  // R35（契約32）: 高所の掛棚を増設 — 「下ばかり見ると見つかる」対策で上方向に分布を作る
+  { model: 'wallshelf', x: -3.0, z: -8.85, yaw: 0, yOff: 4.7 }, // 窓の上
+  { model: 'wallshelf', x: 2.6, z: -8.8, yaw: 0, yOff: 4.15, scale: 0.9 }, // TV上の額のさらに上
+  { model: 'wallshelf', x: 3.4, z: 8.8, yaw: 180, yOff: 4.3, scale: 0.95 }, // +z壁・額の上
+  { model: 'wallshelf', x: -8.8, z: -0.9, yaw: 90, yOff: 4.0, scale: 0.9 }, // -x壁・高所
   // ---- 天井（梁吊り: 梁は x=±5 と z=±5 に走る・下面≈5.78） ----
   { model: 'chandelier', x: 0, z: -5.0, yaw: 0, topY: 5.78 },
   { model: 'hangplant', x: -5.0, z: 3.5, yaw: 30, topY: 5.78 },

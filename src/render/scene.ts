@@ -13,7 +13,8 @@ import { disposeFelt, feltTexture } from './felt';
 import { buildPlushDolls, disposePlushTextures } from './plush';
 import { PlushReactions } from './plushReaction';
 import { HIDE_SPOTS, hashSeed, type HideSpot } from './hideSpots';
-import { makeFloorWood, makeWallPaper, makeCeilingWood, makeRugPattern } from './roomTextures';
+import { makeFloorWood, makeWallPaper, makeCeilingWood, makeRugPattern, makeRectRug, makeShadowBlob } from './roomTextures';
+import { FURNITURE_BOXES } from './hideSpots';
 import { nextRng, shuffle } from '../core';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
 import { orderedMeldCards } from './meldSort';
@@ -222,6 +223,9 @@ export class TableScene {
   // 契約27(R29): 躯体/ラグの Canvas テクスチャとラグメッシュ（dispose 対象）
   private roomTextures: THREE.Texture[] = [];
   private rugMesh: THREE.Mesh | null = null;
+  // 契約32(R35): ゾーンラグ+接地影メッシュ（dispose対象）と「見えている床」円盤
+  private zoneDecor: THREE.Mesh[] = [];
+  private floorDisc: THREE.Mesh | null = null;
   /** かくれんぼ発見通知（初回注視リアクション時に一度だけ・app がコールアウト/SFXへ接続）。 */
   onHiddenFound: ((kind: 'dalmatian' | 'panda') => void) | null = null;
   // 検証用（契約29追補）: __spotShot が置くテスト個体（常に1体・呼ぶたび置き直す）
@@ -473,15 +477,18 @@ export class TableScene {
     rim.receiveShadow = true;
     this.scene.add(rim);
 
-    // 卓下の影の受け皿（部屋の床の上に敷く円盤・暖色の木調に寄せる）
+    // 卓下の影の受け皿（部屋の床の上に敷く円盤）。
+    // 契約32: この円盤（y=-0.45・半径14）が部屋全体の床を覆っており「見えている床」の実体はこれ。
+    // 従来はほぼ黒の単色＝のっぺりの真因だった。マテリアルは buildRoom が木目テクスチャ一式で差し替える。
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(14, 48),
-      new THREE.MeshStandardMaterial({ color: '#2a1d12', roughness: 1 }),
+      new THREE.MeshStandardMaterial({ color: '#5a4530', roughness: 1 }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = -0.45;
     floor.receiveShadow = true;
     this.scene.add(floor);
+    this.floorDisc = floor;
   }
 
   /**
@@ -510,9 +517,38 @@ export class TableScene {
       roughness: 1, // roughnessMap の値をそのまま使う（乗算係数）
       metalness: 0,
       envMapIntensity: 1.3, // 契約31: 磨いた床の環境映り込みで艶と情報量を出す
+      // 契約32: 照明の届かない領域で床が真っ黒＝のっぺりの真因。テクスチャ自体を弱く自己発光させ、
+      // どの席・どの方角からでも板目が読める下限輝度を保証する（カード視認性には無関係）。
+      emissiveMap: floorTexs.map,
+      emissive: new THREE.Color('#4d4d4d'),
       side: THREE.BackSide,
     });
     floorMat.normalScale?.set?.(1.3, 1.3);
+    // 「見えている床」＝影受け円盤（半径14・y=-0.45）へ同じ木目一式を適用（契約32・のっぺりの真因対策）。
+    // 円盤は直径28mにUV1枚なので、板スケールを箱面（18mにrepeat5）と揃えるため repeat 7.8 のクローンを使う。
+    if (this.floorDisc) {
+      const cloneTex = (t: THREE.Texture): THREE.Texture => {
+        const c = t.clone();
+        c.repeat.set(7.8, 7.8);
+        c.needsUpdate = true;
+        this.roomTextures.push(c);
+        return c;
+      };
+      const dMap = cloneTex(floorTexs.map);
+      (this.floorDisc.material as THREE.Material).dispose?.();
+      const discMat = new THREE.MeshStandardMaterial({
+        map: dMap,
+        normalMap: cloneTex(floorTexs.normalMap),
+        roughnessMap: cloneTex(floorTexs.roughnessMap),
+        roughness: 1,
+        metalness: 0,
+        envMapIntensity: 1.3,
+        emissiveMap: dMap,
+        emissive: new THREE.Color('#4d4d4d'),
+      });
+      discMat.normalScale?.set?.(1.3, 1.3);
+      this.floorDisc.material = discMat;
+    }
     const mats = [wallMat, wallMat, ceilMat, floorMat, wallMat, wallMat];
     const room = new THREE.Mesh(new THREE.BoxGeometry(S, H, S), mats);
     room.position.set(0, floorY + H / 2, 0);
@@ -588,12 +624,59 @@ export class TableScene {
     this.roomTextures.push(rugTex);
     this.rugMesh = new THREE.Mesh(
       new THREE.CircleGeometry(5.2, 48),
-      new THREE.MeshStandardMaterial({ map: rugTex, roughness: 0.95, metalness: 0 }),
+      new THREE.MeshStandardMaterial({ map: rugTex, roughness: 0.95, metalness: 0, emissiveMap: rugTex, emissive: new THREE.Color('#474747') }),
     );
     this.rugMesh.rotation.x = -Math.PI / 2;
-    this.rugMesh.position.y = floorY + 0.02;
+    this.rugMesh.position.y = floorY + 0.072; // 見えている床（影受け円盤 y=-0.45）の上（契約32）
     this.rugMesh.receiveShadow = false;
     this.scene.add(this.rugMesh);
+
+    // 契約32(R35): 床の奥行き — ゾーンラグ2枚 + 全床置き家具の接地影（フェイクAO・+3描画コール）。
+    const rectRugTex = makeRectRug();
+    this.roomTextures.push(rectRugTex);
+    const rectRug = new THREE.Mesh(
+      new THREE.PlaneGeometry(3.4, 4.8),
+      new THREE.MeshStandardMaterial({ map: rectRugTex, roughness: 0.97, metalness: 0, emissiveMap: rectRugTex, emissive: new THREE.Color('#474747') }),
+    );
+    rectRug.geometry.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+    rectRug.rotation.y = 0.06;
+    rectRug.position.set(-6.7, floorY + 0.069, 1.9); // ソファゾーン（コーヒーテーブル/プフが上に載る）
+    this.scene.add(rectRug);
+    this.zoneDecor.push(rectRug);
+    const nookRugTex = makeRugPattern();
+    this.roomTextures.push(nookRugTex);
+    const nookRug = new THREE.Mesh(
+      new THREE.CircleGeometry(1.9, 40),
+      new THREE.MeshStandardMaterial({ map: nookRugTex, roughness: 0.97, metalness: 0, emissiveMap: nookRugTex, emissive: new THREE.Color('#474747') }),
+    );
+    nookRug.geometry.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+    nookRug.position.set(6.6, floorY + 0.067, -6.1); // 読書ヌック（アームチェアの下）
+    this.scene.add(nookRug);
+    this.zoneDecor.push(nookRug);
+    // 接地影: 家具AABBの実測値から楕円ブロブを1メッシュに統合（家具が床に「置いてある」感を出す）
+    const blobTex = makeShadowBlob();
+    this.roomTextures.push(blobTex);
+    const blobGeos: THREE.BufferGeometry[] = [];
+    const M2 = new THREE.Matrix4();
+    for (const b of FURNITURE_BOXES) {
+      if (b.name === 'table' || b.min[1] > -0.45) continue; // 床置き家具のみ（吊り・壁掛けは除外）
+      const cx = (b.min[0] + b.max[0]) / 2;
+      const cz = (b.min[2] + b.max[2]) / 2;
+      // ラグの上に載る家具はラグ自体が接地感を出すので影を省く（重なって黒沈みするのを防ぐ）
+      if (cx > -8.4 && cx < -5.0 && cz > -0.5 && cz < 4.3) continue; // ソファゾーンのラグ
+      if (Math.hypot(cx - 6.6, cz + 6.1) < 1.9) continue; // 読書ヌックの丸ラグ
+      const g2 = new THREE.PlaneGeometry((b.max[0] - b.min[0]) * 0.95, (b.max[2] - b.min[2]) * 0.95);
+      g2.applyMatrix4(M2.makeRotationX(-Math.PI / 2));
+      g2.applyMatrix4(M2.makeTranslation(cx, floorY + 0.063, cz));
+      blobGeos.push(g2);
+    }
+    const blobs = new THREE.Mesh(
+      mergeGeometries(blobGeos, false),
+      new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false }),
+    );
+    blobs.receiveShadow = false;
+    this.scene.add(blobs);
+    this.zoneDecor.push(blobs);
 
     // 窓（-z 壁）+ 十字桟 + 左右カーテン。発光パネルは glow バケット（Bloom 非対象・レイヤ0）。
     const winW = 5.0;
@@ -944,6 +1027,15 @@ export class TableScene {
         const bb3 = new THREE.Box3().setFromObject(clone);
         clone.position.y += baseY - bb3.min.y; // 縮小後に再接地
       }
+      // 最終沈降（契約32・2026-08-12 浮き報告の根本対策）: バウンディング底面直下の実サーフェスとの
+      // 隙間を実測し、浮いていれば着地させる（スナップが天面の縁など誤った面を掴んだケースを吸収）。
+      clone.updateMatrixWorld(true);
+      const bb4 = new THREE.Box3().setFromObject(clone);
+      ray.set(new THREE.Vector3(p.x, bb4.min.y + 0.02, p.z), new THREE.Vector3(0, -1, 0));
+      const below = ray.intersectObject(this.roomGlb, true)[0] as { point: { y: number } } | undefined;
+      const surfaceY = Math.max(below ? below.point.y : -0.45, -0.45); // 素の床＝影受け円盤の面（契約32）
+      const gap = bb4.min.y - surfaceY;
+      if (gap > 0.04 && gap < 0.7) clone.position.y -= gap;
     }
     clone.updateMatrixWorld(true);
     this.scene.add(clone);
@@ -2427,6 +2519,32 @@ export class TableScene {
       this.camera.updateProjectionMatrix();
       return url;
     };
+    // 検証用（契約32）: 全候補地×両モデルの数値監査。配置後の「接地ギャップ」（底面と直下サーフェスの
+    // 隙間＝浮き）と「最終身長」（クリアランス縮小・ジッター込みの実寸＝小さすぎ）を実測して返す。
+    // スクリーンショット不要・決定的。gap>0.04 か height<0.29 の行が要修正。
+    (el as unknown as { __spotAudit?: () => unknown }).__spotAudit = () => {
+      const out: { i: number; kind: string; gap: number; height: number }[] = [];
+      const ray = new THREE.Raycaster();
+      for (let i = 0; i < HIDE_SPOTS.length; i++) {
+        const p = HIDE_SPOTS[i]!;
+        for (const kind of ['panda', 'dalmatian'] as const) {
+          const src = this.plushSrc[kind];
+          if (!src) continue;
+          const clone = this.placeCloneAt(p, src);
+          const bb = new THREE.Box3().setFromObject(clone);
+          const height = bb.max.y - bb.min.y;
+          let surfaceY = -0.45;
+          if (this.roomGlb) {
+            ray.set(new THREE.Vector3(p.x, bb.min.y + 0.02, p.z), new THREE.Vector3(0, -1, 0));
+            const below = ray.intersectObject(this.roomGlb, true)[0] as { point: { y: number } } | undefined;
+            if (below) surfaceY = Math.max(below.point.y, -0.45);
+          }
+          out.push({ i, kind, gap: +(bb.min.y - surfaceY).toFixed(3), height: +height.toFixed(3) });
+          this.scene.remove(clone);
+        }
+      }
+      return out;
+    };
     // 検証用（契約26）: かくれんぼの現在配置（[パンダ, ダルメシアン] の順・ワールド座標とスケール）。
     (el as unknown as { __hiddenProbe?: () => unknown }).__hiddenProbe = () =>
       this.hiddenPlush.map((o) => ({
@@ -2969,6 +3087,12 @@ export class TableScene {
       this.scene.remove(this.rugMesh);
       this.rugMesh = null;
     }
+    for (const m of this.zoneDecor) {
+      m.geometry?.dispose?.();
+      (m.material as THREE.Material).dispose?.();
+      this.scene.remove(m);
+    }
+    this.zoneDecor = [];
     // GLB 未ロードのまま破棄される場合に備え、swap 家具（クローンマテリアル）も明示解放（契約25）
     for (const mesh of this.swapFurniture) {
       mesh.geometry?.dispose?.();
