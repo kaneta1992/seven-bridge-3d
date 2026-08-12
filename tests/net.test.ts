@@ -3,7 +3,7 @@
 // - 視界フィルタ配信（他家手札・山札をペイロードに含めない E5）
 // - スナップショット順序保証（古い seq を破棄 E3）
 // - セッション統合（名簿・開始・伝播・ホスト切断 D5 / 再接続復帰）
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cardId } from '../src/core';
 import type { GameDriver } from '../src/driver/types';
 import { GuestDriver } from '../src/net/guestDriver';
@@ -466,6 +466,61 @@ describe('LobbyLink 公開ロビー（固定チャネル広告）', () => {
 
     adv.dispose();
     view.dispose();
+  });
+
+  describe('自己修復（契約35: nostr購読死・スリープ復帰でのロビー復旧）', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it('ピア0で無活動が続くとトランスポートを作り直し、復旧後に広告が再び届く', async () => {
+      vi.useFakeTimers();
+      let clock = 1000;
+      const hubDead = new MockHub(); // 購読が死んだロビー相当（誰にも出会えない）
+      const hubLive = new MockHub(); // 復旧後のロビー
+      let healed = 0;
+      const view = new LobbyLink(hubDead.create('viewer'), { now: () => clock });
+      view.watch();
+      view.enableSelfHeal(
+        () => {
+          healed++;
+          return hubLive.create('viewer2');
+        },
+        1000,
+        5000,
+      );
+      clock += 6000; // 無活動 5s 超
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(healed).toBe(1);
+      // 復旧後のロビーではホストの広告が届く
+      const adv = new LobbyLink(hubLive.create('host'), { now: () => clock });
+      adv.startAdvertising(() => ({ code: 'ABC234', hostName: 'H', count: 2, rounds: 4 }));
+      await vi.advanceTimersByTimeAsync(200);
+      expect(view.getRooms().length).toBe(1);
+      adv.dispose();
+      view.dispose();
+    });
+
+    it('ピアが居る間は無活動でも作り直さない（広告はWebRTC上を流れるため）', async () => {
+      vi.useFakeTimers();
+      let clock = 1000;
+      const hub = new MockHub();
+      const view = new LobbyLink(hub.create('viewer'), { now: () => clock });
+      const adv = new LobbyLink(hub.create('host'), { now: () => clock });
+      let healed = 0;
+      view.enableSelfHeal(
+        () => {
+          healed++;
+          return hub.create('viewer2');
+        },
+        1000,
+        5000,
+      );
+      await vi.advanceTimersByTimeAsync(50); // 相互 join を配送
+      clock += 60_000;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(healed).toBe(0);
+      adv.dispose();
+      view.dispose();
+    });
   });
 
   it('sanitizeRoomAd: 不正コード/型不一致は破棄し、人数・ラウンドは範囲内へ丸める（E4）', () => {

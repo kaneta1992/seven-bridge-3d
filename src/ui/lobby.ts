@@ -30,6 +30,8 @@ export interface LobbyCallbacks {
   onJoinRoom: (code: string, name: string) => void;
   /** 公開ルーム一覧の購読（未提供なら公開タブは空表示・E4）。戻り値は解除関数。 */
   watchPublicRooms?: (cb: (rooms: RoomAd[]) => void) => () => void;
+  /** ロビーチャネルの接続ピア数（診断表示用・契約35）。 */
+  lobbyPeers?: () => number;
 }
 
 const DEFAULT_NAMES = ['あかり', 'はると', 'つむぎ', 'ゆうと', 'さくら', 'そうた'];
@@ -179,8 +181,10 @@ function publicList(body: HTMLElement, cb: LobbyCallbacks, state: LobbyState): (
       return;
     }
     const rs = relayStatus();
+    const peers = cb.lobbyPeers?.() ?? -1;
+    const peerTxt = peers >= 0 ? ` ・ ロビーピア ${peers}` : '';
     const warn = rs.connected === 0 ? ' ⚠ リレーに接続できていません（ネットワーク制限の可能性）' : '';
-    diag.textContent = `接続リレー ${rs.connected}/${rs.total} ・ build ${__BUILD_ID__}${warn}`;
+    diag.textContent = `接続リレー ${rs.connected}/${rs.total}${peerTxt} ・ build ${__BUILD_ID__}${warn}`;
   };
   paintDiag();
   diagTimer = window.setInterval(paintDiag, 2000);

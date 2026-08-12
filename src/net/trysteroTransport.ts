@@ -24,6 +24,39 @@ const RELAY_URLS = [
 ];
 
 /**
+ * ICE サーバー設定（契約35・2026-08-12 公開ルーム可視性の端末ペア差の根本対応）。
+ * - STUN のみだと CGNAT/対称NAT のモバイル同士は WebRTC を確立できず、「ある端末には広告が届き
+ *   別の端末には届かない」ペア依存の症状になる。TURN（中継）を最終経路として加える。
+ * - TURN は無料公開の Open Relay（Metered）をベストエフォートで指定。死んでいても単に候補が
+ *   増えるだけで害はない。
+ * - 注入経路の罠: trystero の rtcConfig は simple-peer(@thaunknown) のコンストラクタ opts へ
+ *   スプレッドされるが、simple-peer が RTCPeerConnection に渡すのは opts.config のみ。
+ *   したがって { config: {...} } の形で包んで渡す必要がある（トップレベル iceServers は無視される）。
+ */
+const ICE_CONFIG: RTCConfiguration = {
+  iceServers: [
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:global.stun.twilio.com:3478',
+        'stun:stun.cloudflare.com:3478',
+      ],
+    },
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+        'turns:openrelay.metered.ca:443?transport=tcp',
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ],
+};
+
+/**
  * ルームコードで部屋へ参加し Transport を返す。
  * appId で名前空間を切り、roomId=コード、password=コードで E2E 暗号化する
  * （コードを知る者だけが復号でき、他ルームと混線しない）。
@@ -32,7 +65,14 @@ export function createTrysteroTransport(code: string): Transport {
   const room = joinRoom(
     // 冗長度は全リレー: ネットワークごとの到達性差（企業/モバイル網のブロック等）に対する
     // 生存率を最大化する（2026-08-11 公開ルーム不可視の環境差対応）。
-    { appId: APP_ID, password: code, relayUrls: RELAY_URLS, relayRedundancy: RELAY_URLS.length },
+    {
+      appId: APP_ID,
+      password: code,
+      relayUrls: RELAY_URLS,
+      relayRedundancy: RELAY_URLS.length,
+      // simple-peer の opts.config へ届く形で ICE を注入（上の ICE_CONFIG コメント参照）
+      rtcConfig: { config: ICE_CONFIG } as unknown as RTCConfiguration,
+    },
     code,
   );
 

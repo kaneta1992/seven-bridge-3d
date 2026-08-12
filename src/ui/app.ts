@@ -245,6 +245,7 @@ export class GameUI {
       onCreateRoom: (cfg) => this.createRoom(cfg),
       onJoinRoom: (code, name) => this.joinRoom(code, name),
       watchPublicRooms: (cb) => this.watchPublicRooms(cb),
+      lobbyPeers: () => this.lobbyBrowser?.peerCount() ?? -1,
     });
     const closeBtn = el('button', { class: 'panel-close', text: '×', title: 'デモ鑑賞に戻る' });
     panel.append(closeBtn);
@@ -313,6 +314,8 @@ export class GameUI {
       try {
         this.lobbyBrowser = new LobbyLink(createTrysteroTransport(LOBBY_ROOM));
         this.lobbyBrowser.watch();
+        // 契約35: nostr購読のサイレント死・スリープ復帰で「新着広告が来ない」端末を自動復旧
+        this.lobbyBrowser.enableSelfHeal(() => createTrysteroTransport(LOBBY_ROOM));
       } catch {
         cb([]);
         return () => {};
@@ -492,6 +495,8 @@ export class GameUI {
       try {
         this.advertiser = new LobbyLink(createTrysteroTransport(LOBBY_ROOM));
         this.advertiser.startAdvertising(() => this.currentRoomAd());
+        // 契約35: ホスト側ロビーの購読死は「誰の一覧にも載らない」直撃なので自己修復必須
+        this.advertiser.enableSelfHeal(() => createTrysteroTransport(LOBBY_ROOM));
       } catch {
         this.advertiser = null; // 広告失敗はゲーム進行に影響させない（E4）
       }

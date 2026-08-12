@@ -10,6 +10,8 @@ const AD_INTERVAL_MS = 3000; // 広告送信間隔（数秒間隔・契約）
 const AD_TTL_MS = 8000; // 受信広告の失効時間（この間 未更新なら一覧から消す＝開始/解散/満員で自然消滅）
 const SWEEP_MS = 1500; // TTL 掃引間隔
 const MAX_ADS = 50; // 保持する広告の全体上限（送信 peer 単位・溢れさせ攻撃の防御・契約10項目4）
+const HEAL_CHECK_MS = 10_000; // 自己修復の点検間隔（契約35）
+const HEAL_STALE_MS = 45_000; // ピア0かつ無活動がこの時間続いたらトランスポートを作り直す
 
 interface LobbyOpts {
   now?: () => number;
@@ -17,8 +19,8 @@ interface LobbyOpts {
 
 /** 固定ロビーチャネルへの接続（広告送信・受信の両役）。 */
 export class LobbyLink {
-  private readonly transport: Transport;
-  private readonly send: (ad: RoomAd) => void;
+  private transport: Transport;
+  private send: (ad: RoomAd) => void = () => undefined;
   private readonly now: () => number;
   // 送信 peer ごとに最新1件だけ保持する（1 peer が多数コードで一覧を溢れさせるのを防ぐ・項目4）。
   private readonly ads = new Map<string, { ad: RoomAd; at: number }>();
@@ -27,16 +29,65 @@ export class LobbyLink {
   private sweepTimer = 0;
   private getAd: (() => RoomAd | null) | null = null;
   private disposed = false;
+  // 自己修復（契約35）: nostr 購読のサイレント死・モバイル復帰でロビーが「新規ピアを発見できない」
+  // 状態に陥ったら、トランスポートを作り直して復旧する。
+  private healFactory: (() => Transport) | null = null;
+  private healTimer = 0;
+  private lastActivity = 0;
+  private onWake: (() => void) | null = null;
 
   constructor(transport: Transport, opts: LobbyOpts = {}) {
     this.transport = transport;
     this.now = opts.now ?? (() => Date.now());
+    this.lastActivity = this.now();
+    this.wire(transport);
+  }
+
+  /** トランスポートへアクション/イベントを結線する（初期化と自己修復の再生成で共用）。 */
+  private wire(transport: Transport): void {
     const [send, recv] = transport.makeAction<RoomAd>(LOBBY_NS);
     this.send = send;
     recv((raw, peer) => this.onAd(raw, peer));
     // 閲覧者がロビーへ入った瞬間に広告を即送する（定期間隔の待ちやモバイルのタイマー
     // 抑制に依存しない・2026-08-11）。広告していない側では postAd が no-op。
-    transport.onPeerJoin(() => this.postAd());
+    transport.onPeerJoin(() => {
+      this.lastActivity = this.now();
+      this.postAd();
+    });
+  }
+
+  /**
+   * 自己修復を有効化する（契約35）。ピア0のまま HEAL_STALE_MS 無活動なら、ロビーの
+   * トランスポートを factory で作り直す（nostr 購読が静かに切れた端末の復旧）。ピアが居る間は
+   * 広告は WebRTC 上を流れるため作り直さない。モバイルの画面復帰/回線復帰でも即点検する。
+   */
+  enableSelfHeal(factory: () => Transport, checkMs = HEAL_CHECK_MS, staleMs = HEAL_STALE_MS): void {
+    if (this.disposed || this.healFactory) return;
+    this.healFactory = factory;
+    const check = (): void => {
+      if (this.disposed || !this.healFactory) return;
+      if (this.transport.getPeers().length > 0) {
+        this.lastActivity = this.now();
+        return;
+      }
+      if (this.now() - this.lastActivity < staleMs) return;
+      this.lastActivity = this.now();
+      try {
+        this.transport.leave();
+      } catch {
+        /* leave 失敗は無視（すでに切断済み等） */
+      }
+      this.transport = this.healFactory();
+      this.wire(this.transport);
+      this.postAd(); // ホスト側は復旧直後に広告を打ち直す
+    };
+    this.healTimer = setIntervalSafe(check, checkMs);
+    // モバイルのスリープ復帰・回線復帰は即点検（タイマー抑制で checkMs が伸びるため）
+    if (typeof window !== 'undefined') {
+      this.onWake = check;
+      window.addEventListener('online', this.onWake);
+      document.addEventListener('visibilitychange', this.onWake);
+    }
   }
 
   // ---- ホスト側（広告送信） ---------------------------------------------
@@ -94,12 +145,29 @@ export class LobbyLink {
       .sort((a, b) => a.hostName.localeCompare(b.hostName) || a.code.localeCompare(b.code));
   }
 
+  /** ロビーの接続ピア数（診断表示用・契約35）。 */
+  peerCount(): number {
+    try {
+      return this.transport.getPeers().length;
+    } catch {
+      return 0;
+    }
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.stopAdvertising();
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = 0;
+    if (this.healTimer) clearInterval(this.healTimer);
+    this.healTimer = 0;
+    this.healFactory = null;
+    if (this.onWake && typeof window !== 'undefined') {
+      window.removeEventListener('online', this.onWake);
+      document.removeEventListener('visibilitychange', this.onWake);
+      this.onWake = null;
+    }
     this.listeners.clear();
     this.ads.clear();
     this.transport.leave();
@@ -108,6 +176,7 @@ export class LobbyLink {
   // ---- 内部 -------------------------------------------------------------
 
   private onAd(raw: unknown, peer: string): void {
+    this.lastActivity = this.now(); // 自己修復の無活動判定（契約35）
     const ad = sanitizeRoomAd(raw); // 4項目のみへ整形＋妥当性検証（不正/汚染は破棄・E5-lobby）
     if (!ad) return;
     // 送信 peer ごとに最新1件へ上書き。新規 peer で全体上限を超える分は破棄（項目4）。
