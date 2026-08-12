@@ -2545,6 +2545,59 @@ export class TableScene {
       }
       return out;
     };
+    // 検証用（契約34）: 候補地 i の「実際に見えるピクセル数」を6席の実カメラ位置から実測する。
+    // テスト個体をマゼンタ不灯マテリアルで配置（深度は通常どおり＝本・棚板・家具の遮蔽が効く）し、
+    // 各席から注視レンダ→readPixels でマゼンタ画素を数える。sMul=0.75 はジッター最小スケール相当の
+    // 最悪ケース。戻り値は席ごとの可視画素数（4pxサンプリング補正済み）。
+    (el as unknown as { __spotVis?: (i: number, sMul?: number) => number[] | null }).__spotVis = (
+      i, sMul = 0.75,
+    ) => {
+      if (this.testPlush) {
+        this.scene.remove(this.testPlush);
+        this.testPlush = null;
+      }
+      const p = HIDE_SPOTS[i];
+      const src = this.plushSrc.panda;
+      if (i < 0 || !p || !src) return null;
+      // 本ラウンドの本物の隠れ個体は監査ノイズになるため一時非表示（静的な囮・家具は実遮蔽として残す）
+      const hidVis = this.hiddenPlush.map((o) => o.visible);
+      for (const o of this.hiddenPlush) o.visible = false;
+      this.testPlush = this.placeCloneAt({ ...p, s: Math.max(0.28, p.s * sMul) }, src);
+      const mag = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+      this.testPlush.traverse((o: THREE.Object3D) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) m.material = mag;
+      });
+      const bb = new THREE.Box3().setFromObject(this.testPlush);
+      const tx = (bb.min.x + bb.max.x) / 2;
+      const ty2 = (bb.min.y + bb.max.y) / 2;
+      const tz = (bb.min.z + bb.max.z) / 2;
+      const gl = this.renderer.getContext() as WebGLRenderingContext;
+      const w = (this.renderer.domElement as HTMLCanvasElement).width;
+      const h = (this.renderer.domElement as HTMLCanvasElement).height;
+      const buf = new Uint8Array(w * h * 4);
+      const counts: number[] = [];
+      const fovKeep = this.camera.fov;
+      for (let k = 0; k < 6; k++) {
+        const a = (k * Math.PI) / 3;
+        this.camera.position.set(Math.sin(a) * 6.1, 2.73, Math.cos(a) * 6.1);
+        this.camera.lookAt(tx, ty2, tz);
+        this.camera.fov = 40;
+        this.camera.updateProjectionMatrix();
+        this.renderer.render(this.scene, this.camera);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+        let c = 0;
+        for (let q = 0; q < buf.length; q += 16) {
+          if (buf[q]! > 200 && buf[q + 1]! < 80 && buf[q + 2]! > 200) c++;
+        }
+        counts.push(c * 4);
+      }
+      this.camera.fov = fovKeep;
+      this.camera.updateProjectionMatrix();
+      mag.dispose();
+      this.hiddenPlush.forEach((o, k) => (o.visible = hidVis[k] ?? true));
+      return counts;
+    };
     // 検証用（契約26）: かくれんぼの現在配置（[パンダ, ダルメシアン] の順・ワールド座標とスケール）。
     (el as unknown as { __hiddenProbe?: () => unknown }).__hiddenProbe = () =>
       this.hiddenPlush.map((o) => ({
