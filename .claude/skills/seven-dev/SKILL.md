@@ -72,7 +72,7 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 - `session.recover()`: visibilitychange/pageshow/online で自動回復（再join・再アナウンス・ホストはスナップ再送・1.5sデバウンス・冪等）
 - 人数はルーム作成時に指定しない（SEAT_CAP=6 内部定数）。開始時の名簿人数で確定
 - 招待: Web Share ボタン + `?room=CODE` URL直行参加（保存名で自動join・replaceStateでループ防止）
-- ルール変更履歴: 親=前ラウンド勝者（流局は継続）/ 開始時めくり札なし / シークエンスは循環ラップ許可（isConsecutiveRun=円環アーク判定・meldSortも循環整列）/ 鳴き10秒・鳴きUIは本人のみ表示 / 自動ツモ
+- ルール変更履歴: 親=累計失点最大の人（2026-08-12変更・同点は直前親優先→席順。旧: 前ラウンド勝者）/ 開始時めくり札なし / シークエンスは循環ラップ許可（isConsecutiveRun=円環アーク判定・meldSortも循環整列）/ 鳴き10秒・鳴きUIは本人のみ表示 / 自動ツモ
 
 ## 演出レイヤ（R5以降）
 - `src/render/particles.ts`（プール制・1種別1drawコールのShaderMaterial粒子）/ `postfx.ts`（EffectComposer+Bloom、失敗時素renderフォールバック）/ `quality.ts`（モバイル自動品質: DPR/Bloom/影/粒子キャップ）

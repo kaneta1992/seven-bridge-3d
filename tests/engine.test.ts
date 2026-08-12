@@ -49,30 +49,33 @@ describe('配札とディーラー移動 (E1: 2人/6人境界・最初のツモ�
     expect(s.players.every((p) => p.hand.length === 7)).toBe(true);
   });
 
-  it('直前ラウンドの勝者が次の親になる（ユーザー指定ルール）', () => {
+  it('累計失点が最大の人（一番負けている人）が次の親になる（2026-08-12 ユーザー指定ルール・契約36）', () => {
     const g = createGame({ players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }], seed: 5 });
     let s = ok(g, { type: 'startRound' });
     expect(s.dealerIndex).toBe(0);
-    // c が上がったことにして次ラウンドを開始
+    // ラウンド1の失点: c が最下位（累計 a=3, b=5, c=12）
     s.phase = 'roundOver';
-    s.lastWinner = 'c';
+    s.lastWinner = 'a';
+    s.scores = [[3, 5, 12]];
     s = ok(s, { type: 'startRound' });
     expect(s.round).toBe(2);
-    expect(s.dealerIndex).toBe(2); // 勝者 c が親
+    expect(s.dealerIndex).toBe(2); // 最大失点の c が親（勝者 a ではない）
     expect(s.currentPlayerIndex).toBe(0); // 親の左隣から
   });
 
-  it('流局（lastWinner=null）では親が継続する', () => {
+  it('累計最下位が同点のときは、直前の親が同点内なら親継続・いなければ席順で最初の同点者', () => {
     const g = createGame({ players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }], seed: 5 });
     let s = ok(g, { type: 'startRound' });
-    // 2ラウンド目: b が勝者 → 親は b
+    // 2ラウンド目: b と c が同点最下位。直前の親 a は同点内にいない → 席順で最初の b が親
     s.phase = 'roundOver';
-    s.lastWinner = 'b';
+    s.lastWinner = 'a';
+    s.scores = [[0, 9, 9]];
     s = ok(s, { type: 'startRound' });
     expect(s.dealerIndex).toBe(1);
-    // 3ラウンド目: 流局 → 親は b のまま
+    // 3ラウンド目: 依然 b と c が同点最下位（累計 0,9,9 のまま流局相当）→ 直前の親 b が同点内 → 親継続
     s.phase = 'roundOver';
     s.lastWinner = null;
+    s.scores = [[0, 9, 9], [0, 0, 0]];
     s = ok(s, { type: 'startRound' });
     expect(s.round).toBe(3);
     expect(s.dealerIndex).toBe(1);

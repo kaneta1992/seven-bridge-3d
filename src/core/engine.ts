@@ -305,12 +305,17 @@ export function applyAction(prev: GameState, action: Action): ActionResult {
       if (state.round >= state.totalRounds) return fail('startRound: all rounds finished');
 
       state.round += 1;
-      // 親の決定: 初回はルーム順先頭。以降は直前ラウンドの勝者が親。流局(lastWinner=null)は親継続。
+      // 親の決定（2026-08-12 ユーザー指定・契約36）: 初回はルーム順先頭。
+      // 以降は「その時点で一番負けている人（累計失点が最大）」が親。
+      // 同点が複数いる場合は、直前の親が同点内なら親継続、いなければ席順で最初の同点者
+      // （決定的＝全クライアント/リプレイで同一。旧ルール: 前ラウンド勝者が親）。
       if (state.round === 1) {
         state.dealerIndex = 0;
-      } else if (state.lastWinner !== null) {
-        const w = playerIndexOf(state.lastWinner);
-        if (w >= 0) state.dealerIndex = w;
+      } else {
+        const totals = computeTotals(state);
+        const worst = Math.max(...totals);
+        const tied = totals.flatMap((t, i) => (t === worst ? [i] : []));
+        state.dealerIndex = tied.includes(state.dealerIndex) ? state.dealerIndex : (tied[0] ?? state.dealerIndex);
       }
       const { result, seed } = shuffle(orderedDeck(), state.rng);
       state.rng = seed;
