@@ -13,7 +13,11 @@ const RANK_LABEL: Record<Rank, string> = {
   8: '8', 9: '9', 10: '10', 11: 'J', 12: 'Q', 13: 'K',
 };
 
-const faceCache = new Map<string, THREE.Texture>();
+// キャッシュはテクスチャと「再描画に必要な元データ」を対で持つ（契約37）。
+// モバイルブラウザはメモリ圧で Canvas のバッキングストアをパージすることがあり、その状態で
+// WebGL コンテキスト復帰の再アップロードが走ると「白いカード」になる。復帰時に redraw して
+// 中身を再生してから needsUpdate する。
+const faceCache = new Map<string, { tex: THREE.Texture; card: Card }>();
 let backCache: THREE.Texture | null = null;
 let maxAniso = 8;
 
@@ -24,12 +28,62 @@ export function setMaxAnisotropy(value: number): void {
 
 /** キャッシュ済みカードテクスチャを破棄しキャッシュを空にする（シーン破棄時）。 */
 export function disposeCardTextures(): void {
-  for (const t of faceCache.values()) t.dispose();
+  for (const v of faceCache.values()) v.tex.dispose();
   faceCache.clear();
   if (backCache) {
     backCache.dispose();
     backCache = null;
   }
+}
+
+/**
+ * 全カードテクスチャの Canvas を再描画して再アップロードを予約する（契約37・白カード対策）。
+ * モバイルのメモリ圧で Canvas バッキングストアがパージされた後、コンテキスト復帰/タブ復帰で
+ * 呼ぶ。Canvas が生きていれば冪等な上書きで無害。戻り値は再描画枚数（診断用）。
+ */
+export function refreshCardTextures(): number {
+  let n = 0;
+  for (const v of faceCache.values()) {
+    const canvas = v.tex.image as HTMLCanvasElement;
+    const ctx = canvas?.getContext?.('2d');
+    if (!ctx) continue;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawFace(ctx, v.card);
+    v.tex.needsUpdate = true;
+    n++;
+  }
+  if (backCache) {
+    const canvas = backCache.image as HTMLCanvasElement;
+    const ctx = canvas?.getContext?.('2d');
+    if (ctx) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawBack(ctx);
+      backCache.needsUpdate = true;
+      n++;
+    }
+  }
+  return n;
+}
+
+/** テスト/再現用: 裏面 Canvas の中心ピクセル（RGBA）。パージ後は [0,0,0,0]、再描画後は紺色に戻る。 */
+export function sampleBackPixelForTest(): number[] | null {
+  const canvas = backCache?.image as HTMLCanvasElement | undefined;
+  const ctx = canvas?.getContext?.('2d');
+  if (!canvas || !ctx) return null;
+  return [...ctx.getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data];
+}
+
+/** テスト/再現用: 全カード Canvas を空にする（モバイルのパージを疑似再現・通常プレイでは呼ばない）。 */
+export function blankCardTexturesForTest(): void {
+  const blank = (tex: THREE.Texture): void => {
+    const canvas = tex.image as HTMLCanvasElement;
+    const ctx = canvas?.getContext?.('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    tex.needsUpdate = true;
+  };
+  for (const v of faceCache.values()) blank(v.tex);
+  if (backCache) blank(backCache);
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
@@ -125,23 +179,19 @@ function drawFace(ctx: CanvasRenderingContext2D, card: Card): void {
 export function faceTexture(card: Card): THREE.Texture {
   const key = cardId(card);
   const hit = faceCache.get(key);
-  if (hit) return hit;
+  if (hit) return hit.tex;
   const canvas = document.createElement('canvas');
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d')!;
   drawFace(ctx, card);
   const tex = finalize(canvas);
-  faceCache.set(key, tex);
+  faceCache.set(key, { tex, card: { suit: card.suit, rank: card.rank } });
   return tex;
 }
 
-export function backTexture(): THREE.Texture {
-  if (backCache) return backCache;
-  const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext('2d')!;
+// カード裏面の描画（backTexture と refreshCardTextures で共用・契約37）。
+function drawBack(ctx: CanvasRenderingContext2D): void {
   ctx.fillStyle = '#0e2a4a';
   roundRect(ctx, 10, 10, W - 20, H - 20, 46);
   ctx.fill();
@@ -178,6 +228,15 @@ export function backTexture(): THREE.Texture {
   ctx.lineWidth = 4;
   roundRect(ctx, 18, 18, W - 36, H - 36, 40);
   ctx.stroke();
+}
+
+export function backTexture(): THREE.Texture {
+  if (backCache) return backCache;
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d')!;
+  drawBack(ctx);
   backCache = finalize(canvas);
   return backCache;
 }

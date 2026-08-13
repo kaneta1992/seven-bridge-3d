@@ -8,12 +8,29 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Card, Meld, PlayerView } from '../core';
 import { cardId } from '../core';
-import { backTexture, disposeCardTextures, faceTexture, setMaxAnisotropy } from './cardTexture';
-import { disposeFelt, feltTexture } from './felt';
+import {
+  backTexture,
+  blankCardTexturesForTest,
+  disposeCardTextures,
+  sampleBackPixelForTest,
+  faceTexture,
+  refreshCardTextures,
+  setMaxAnisotropy,
+} from './cardTexture';
+import { disposeFelt, feltTexture, refreshFelt } from './felt';
 import { buildPlushDolls, disposePlushTextures } from './plush';
 import { PlushReactions } from './plushReaction';
 import { HIDE_SPOTS, hashSeed, type HideSpot } from './hideSpots';
-import { makeFloorWood, makeWallPaper, makeCeilingWood, makeRugPattern, makeRectRug, makeShadowBlob } from './roomTextures';
+import {
+  clearRoomTextureRegistry,
+  makeCeilingWood,
+  makeFloorWood,
+  makeRectRug,
+  makeRugPattern,
+  makeShadowBlob,
+  makeWallPaper,
+  refreshRoomTextures,
+} from './roomTextures';
 import { FURNITURE_BOXES } from './hideSpots';
 import { nextRng, shuffle } from '../core';
 import { CARD_H, CARD_W, centerKeepout, layoutSeatMelds, type MeldInput } from './meldLayout';
@@ -144,6 +161,10 @@ export class TableScene {
   // WebGL コンテキストロスト対応（項目11）: ロスト検知でループを止め復帰案内を出す。
   private onContextLost!: (e: Event) => void;
   private onContextRestored!: (e: Event) => void;
+  private onVisibilityRefresh: (() => void) | null = null;
+  private lostPollTimer = 0;
+  private canaryTimer = 0;
+  private lastCanvasRefreshAt = 0;
   private lostNoticeEl: HTMLElement | null = null;
 
   private seatCount = 4;
@@ -2545,6 +2566,32 @@ export class TableScene {
       }
       return out;
     };
+    // 検証用（契約37）: 白カード問題の再現・修復確認。'purge'=全カードCanvasを空にする（モバイルの
+    // バッキングストアパージの疑似再現）/ 'lose'/'restore'=WebGLコンテキストの強制ロスト/復帰 /
+    // 'refresh'=手動再描画。組み合わせ「purge→lose→restore」が実機の白カード再現手順。
+    (el as unknown as { __glTest?: (mode: string) => string }).__glTest = (mode) => {
+      if (mode === 'purge') {
+        blankCardTexturesForTest();
+        return 'purged';
+      }
+      if (mode === 'refresh') {
+        return `refreshed ${refreshCardTextures()}`;
+      }
+      if (mode === 'checkback') {
+        return JSON.stringify(sampleBackPixelForTest());
+      }
+      const ext = (this.renderer.getContext() as WebGLRenderingContext).getExtension('WEBGL_lose_context');
+      if (!ext) return 'no WEBGL_lose_context';
+      if (mode === 'lose') {
+        ext.loseContext();
+        return 'lost';
+      }
+      if (mode === 'restore') {
+        ext.restoreContext();
+        return 'restored';
+      }
+      return 'unknown mode';
+    };
     // 検証用（契約34）: 候補地 i の「実際に見えるピクセル数」を6席の実カメラ位置から実測する。
     // テスト個体をマゼンタ不灯マテリアルで配置（深度は通常どおり＝本・棚板・家具の遮蔽が効く）し、
     // 各席から注視レンダ→readPixels でマゼンタ画素を数える。sMul=0.75 はジッター最小スケール相当の
@@ -2689,9 +2736,31 @@ export class TableScene {
       this.running = false;
       cancelAnimationFrame(this.raf);
       this.showLostNotice();
+      // 契約37: 一部環境（Android WebView・非表示タブ等）では webglcontextrestored が発火しない。
+      // イベントに頼らず isContextLost() を1秒毎に確認し、復帰していたら「本物のイベントを dispatch」する。
+      // 敵対レビュー指摘: 自前ハンドラ直呼びだと three 内部の onContextRestore（initGLContext）が走らず
+      // _isContextLost=true のまま render が no-op になるゾンビ状態を作る。イベント経由なら three→自前の順で走る。
+      if (!this.lostPollTimer) {
+        this.lostPollTimer = window.setInterval(() => {
+          try {
+            const gl = this.renderer.getContext() as WebGLRenderingContext;
+            if (!gl.isContextLost()) el.dispatchEvent(new Event('webglcontextrestored'));
+          } catch {
+            /* 取得失敗中はロスト継続と見なす */
+          }
+        }, 1000);
+      }
     };
     this.onContextRestored = (): void => {
+      if (this.lostPollTimer) {
+        window.clearInterval(this.lostPollTimer);
+        this.lostPollTimer = 0;
+      }
       this.hideLostNotice();
+      // 契約37（白カード対策）: モバイルはメモリ圧で Canvas バッキングストアをパージすることがあり、
+      // その状態の再アップロードは「白いカード/黒い床」になる（GLB の ImageBitmap は無事）。
+      // 復帰時に Canvas 由来テクスチャを一括再描画してからアップロードさせる。
+      this.refreshAllCanvasTextures();
       if (!this.running) {
         this.running = true;
         this.raf = requestAnimationFrame(this.loop);
@@ -2700,6 +2769,41 @@ export class TableScene {
     };
     el.addEventListener('webglcontextlost', this.onContextLost as EventListener);
     el.addEventListener('webglcontextrestored', this.onContextRestored as EventListener);
+    // タブ復帰でも点検（コンテキストロストを伴わない Canvas パージへの保険・契約37）。
+    // カナリア（裏面 Canvas の中心1画素）が空のときだけ全再描画する＝通常復帰では無コスト。
+    this.onVisibilityRefresh = (): void => {
+      if (document.visibilityState !== 'visible' || this.lostNoticeEl) return; // ロスト中は復帰処理に任せる
+      if (this.isCanvasPurged()) this.refreshAllCanvasTextures();
+      this.wake();
+    };
+    document.addEventListener('visibilitychange', this.onVisibilityRefresh);
+    // カナリア監視（契約37・敵対レビュー指摘）: イベントが一切来ない継続プレイ中のパージも
+    // 30秒毎の1画素検査で検知して自己回復する。
+    this.canaryTimer = window.setInterval(() => {
+      if (this.lostNoticeEl) return;
+      if (this.isCanvasPurged()) this.refreshAllCanvasTextures();
+    }, 30_000);
+  }
+
+  /** カナリア: カード裏面 Canvas の中心画素が空（=バッキングストアがパージされた）か。 */
+  private isCanvasPurged(): boolean {
+    const px = sampleBackPixelForTest();
+    return !!px && px[3] === 0;
+  }
+
+  /**
+   * Canvas 由来の共有テクスチャ（カード・フェルト・部屋躯体/ラグ）を一括再描画し再アップロードを
+   * 予約する（契約37）。冪等。直近1.5秒以内に実行済みならスキップ（イベント+ポーリングの二重実行防止）。
+   */
+  private refreshAllCanvasTextures(): void {
+    const now = Date.now();
+    if (now - this.lastCanvasRefreshAt < 1500) return;
+    this.lastCanvasRefreshAt = now;
+    refreshCardTextures();
+    refreshFelt();
+    refreshRoomTextures();
+    // 部屋テクスチャは clone（床円盤の repeat 違い）を含めて scene が全数保持している
+    for (const t of this.roomTextures) t.needsUpdate = true;
   }
 
   private showLostNotice(): void {
@@ -3041,6 +3145,18 @@ export class TableScene {
     cel.removeEventListener('wheel', this.onCamWheel);
     cel.removeEventListener('webglcontextlost', this.onContextLost as EventListener);
     cel.removeEventListener('webglcontextrestored', this.onContextRestored as EventListener);
+    if (this.onVisibilityRefresh) {
+      document.removeEventListener('visibilitychange', this.onVisibilityRefresh);
+      this.onVisibilityRefresh = null;
+    }
+    if (this.lostPollTimer) {
+      window.clearInterval(this.lostPollTimer);
+      this.lostPollTimer = 0;
+    }
+    if (this.canaryTimer) {
+      window.clearInterval(this.canaryTimer);
+      this.canaryTimer = 0;
+    }
     this.hideLostNotice();
     this.cineFadeEl?.remove(); // シネマ黒フェード幕（契約19項目5）
     this.cineFadeEl = null;
@@ -3134,6 +3250,7 @@ export class TableScene {
     // 躯体/ラグの Canvas テクスチャとラグメッシュ（契約27・E3）
     for (const t of this.roomTextures) t.dispose?.();
     this.roomTextures = [];
+    clearRoomTextureRegistry(); // 再描画レジストリも空に（契約37・次シーンで再登録される）
     if (this.rugMesh) {
       this.rugMesh.geometry?.dispose?.();
       (this.rugMesh.material as THREE.Material).dispose?.();

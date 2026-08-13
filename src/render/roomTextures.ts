@@ -10,6 +10,22 @@ function canvas(size: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
   return [c, g];
 }
 
+// 再描画レジストリ（契約37・白カード対策の横展開）: モバイルのメモリ圧で Canvas バッキングストアが
+// パージされた後、復帰時に中身を再生できるよう「この Canvas をどう描くか」を対で覚えておく。
+// テクスチャの needsUpdate は呼び出し側（scene が clone 含む全テクスチャを把握している）が立てる。
+const redrawRegistry: (() => void)[] = [];
+
+/** 登録済みの部屋テクスチャ Canvas を全再描画する（パージ復旧・冪等）。戻り値は枚数。 */
+export function refreshRoomTextures(): number {
+  for (const redraw of redrawRegistry) redraw();
+  return redrawRegistry.length;
+}
+
+/** レジストリを空にする（シーン破棄時。テクスチャ自体の dispose は scene 側）。 */
+export function clearRoomTextureRegistry(): void {
+  redrawRegistry.length = 0;
+}
+
 // 決定的な擬似乱数（毎回同じ見た目・テストや再訪で変化しない）
 function rng(seed: number): () => number {
   let s = seed >>> 0;
@@ -59,8 +75,12 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
       p.row(y);
     }
   };
-  // ---- カラー ----
   const [cc, cg] = canvas(S);
+  const [, hg] = canvas(S); // 高さマップ用（ImageData 経由でのみ使う）
+  const [nc, ng] = canvas(S);
+  const [rc, rgx] = canvas(S); // 粗さ用
+  const paint = (): void => {
+  // ---- カラー ----
   cg.fillStyle = '#6b5136';
   cg.fillRect(0, 0, S, S);
   layout({
@@ -104,7 +124,6 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
     },
   });
   // ---- 高さ（グレースケール） → Sobel で法線へ ----
-  const [, hg] = canvas(S); // 高さマップは ImageData 経由でのみ使う（canvas 本体は不要）
   hg.fillStyle = '#808080';
   hg.fillRect(0, 0, S, S);
   layout({
@@ -136,7 +155,6 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
     },
   });
   const hd = hg.getImageData(0, 0, S, S).data;
-  const [nc, ng] = canvas(S);
   const nd = ng.createImageData(S, S);
   const H = (x: number, y: number): number => hd[(((y + S) % S) * S + ((x + S) % S)) * 4]!;
   const STR = 3.2; // 法線強度（契約31: 目地・木目の起伏を強調）
@@ -154,7 +172,6 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
   }
   ng.putImageData(nd, 0, 0);
   // ---- 粗さ: 目地=ザラ(255)・板面=磨いた木のツヤ(130〜165)・木目でムラ（契約31: ランプの映り込みを出す） ----
-  const [rc, rgx] = canvas(S);
   rgx.fillStyle = 'rgb(170,170,170)';
   rgx.fillRect(0, 0, S, S);
   layout({
@@ -187,6 +204,9 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
       rgx.fillRect(0, y + rh - 2, S, 2);
     },
   });
+  };
+  paint();
+  redrawRegistry.push(paint); // 契約37: パージ復旧用
   const finish = (cnv: HTMLCanvasElement, srgb: boolean): THREE.CanvasTexture => {
     const t = new THREE.CanvasTexture(cnv);
     t.wrapS = t.wrapT = THREE.RepeatWrapping ?? 1000;
@@ -202,6 +222,7 @@ export function makeFloorWood(): { map: THREE.CanvasTexture; normalMap: THREE.Ca
 export function makeWallPaper(): THREE.CanvasTexture {
   const S = 1024;
   const [c, g] = canvas(S);
+  const paint = (): void => {
   const rand = rng(19851123);
   const wainH = 176; // 下部 ~1.1m 相当（壁高6.6m・v方向は非リピート）
   const railY = S - wainH;
@@ -253,6 +274,9 @@ export function makeWallPaper(): THREE.CanvasTexture {
   g.fillRect(0, S - 26, S, 26);
   g.fillStyle = 'rgba(255,230,200,0.08)';
   g.fillRect(0, S - 26, S, 3);
+  };
+  paint();
+  redrawRegistry.push(paint); // 契約37
   const t = new THREE.CanvasTexture(c);
   t.wrapS = THREE.RepeatWrapping ?? 1000;
   t.wrapT = THREE.ClampToEdgeWrapping ?? 1001;
@@ -265,6 +289,7 @@ export function makeWallPaper(): THREE.CanvasTexture {
 export function makeCeilingWood(): THREE.CanvasTexture {
   const S = 512;
   const [c, g] = canvas(S);
+  const paint = (): void => {
   const rand = rng(7777);
   const rows = 6;
   const rh = S / rows;
@@ -284,6 +309,9 @@ export function makeCeilingWood(): THREE.CanvasTexture {
     g.fillStyle = 'rgba(15,10,5,0.5)';
     g.fillRect(0, r * rh + rh - 1.5, S, 1.5);
   }
+  };
+  paint();
+  redrawRegistry.push(paint); // 契約37
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping ?? 1000;
   t.repeat.set(4, 4);
@@ -295,12 +323,17 @@ export function makeCeilingWood(): THREE.CanvasTexture {
 export function makeShadowBlob(): THREE.CanvasTexture {
   const S = 256;
   const [c, g] = canvas(S);
+  const paint = (): void => {
+  g.clearRect(0, 0, S, S);
   const grad = g.createRadialGradient(S / 2, S / 2, S * 0.08, S / 2, S / 2, S * 0.5);
   grad.addColorStop(0, 'rgba(0,0,0,0.28)');
   grad.addColorStop(0.55, 'rgba(0,0,0,0.14)');
   grad.addColorStop(1, 'rgba(0,0,0,0)');
   g.fillStyle = grad;
   g.fillRect(0, 0, S, S);
+  };
+  paint();
+  redrawRegistry.push(paint); // 契約37
   return new THREE.CanvasTexture(c);
 }
 
@@ -308,6 +341,9 @@ export function makeShadowBlob(): THREE.CanvasTexture {
 export function makeRectRug(): THREE.CanvasTexture {
   const S = 1024;
   const [c, g] = canvas(S);
+  const paint = (): void => {
+  const rand = rng(4649);
+  g.clearRect(0, 0, S, S);
   // 暖色照明下でも床と分離して見える、クリーム×テラコッタの高コントラスト柄（青系は泥色に転ぶ）
   g.fillStyle = '#b3a184';
   g.fillRect(0, 0, S, S);
@@ -325,11 +361,14 @@ export function makeRectRug(): THREE.CanvasTexture {
     g.fillRect(x, 4, 14, 22);
     g.fillRect(x, S - 26, 14, 22);
   }
-  // 織りノイズ
+  // 織りノイズ（シード付き＝再描画でも同じ柄・契約37）
   for (let i = 0; i < 2600; i++) {
     g.fillStyle = i % 2 ? 'rgba(255,250,240,0.05)' : 'rgba(10,15,20,0.06)';
-    g.fillRect(Math.random() * S, Math.random() * S, 2, 2);
+    g.fillRect(rand() * S, rand() * S, 2, 2);
   }
+  };
+  paint();
+  redrawRegistry.push(paint); // 契約37
   const t = new THREE.CanvasTexture(c);
   t.anisotropy = 4;
   t.colorSpace = THREE.SRGBColorSpace ?? 'srgb';
@@ -341,6 +380,8 @@ export function makeRugPattern(): THREE.CanvasTexture {
   const S = 1024;
   const [c, g] = canvas(S);
   const cx = S / 2;
+  const paint = (): void => {
+  g.clearRect(0, 0, S, S);
   g.fillStyle = '#5b2f2c';
   g.beginPath();
   g.arc(cx, cx, cx, 0, Math.PI * 2);
@@ -413,6 +454,9 @@ export function makeRugPattern(): THREE.CanvasTexture {
   g.beginPath();
   g.arc(cx, cx, 24, 0, Math.PI * 2);
   g.fill();
+  };
+  paint();
+  redrawRegistry.push(paint); // 契約37
   const t = new THREE.CanvasTexture(c);
   t.anisotropy = 4;
   t.colorSpace = THREE.SRGBColorSpace ?? 'srgb';

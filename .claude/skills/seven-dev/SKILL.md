@@ -50,6 +50,7 @@ git diff --name-only -- src/core | (! grep .)   # core非改変ゲート（UI作
 
 ## 落とし穴
 - **公開ルームの可視性はリレー×WebRTCの2段（R38/契約35）**: 広告は nostr でピア発見→WebRTC データチャネルで配送。TURN 必須（STUN のみだとモバイル CGNAT 同士のペアが繋がらず「端末により見えたり見えなかったり」になる）。**trystero の rtcConfig は simple-peer の opts へスプレッドされるため `{ config: { iceServers } }` と包んで渡す**（トップレベル iceServers は無視される罠）。ロビーは `LobbyLink.enableSelfHeal`（ピア0+無活動45sでトランスポート再生成）で nostr 購読死から自己復旧する。診断はロビー画面の「接続リレー n/8・ロビーピア m」
+- **Canvas由来テクスチャはモバイルでパージされ「白カード/黒床」になる（R40/契約37）**: 対策は3系統（restored/タブ復帰カナリアゲート/30秒カナリア）＋各モジュールの refresh API（cardTexture/felt/roomTextures redrawレジストリ）。**復帰ポーリングで自前ハンドラを直呼びしてはいけない**（threeのinitGLContextが飛び描画ゾンビ化）— 必ず `el.dispatchEvent(new Event('webglcontextrestored'))`。新しい Canvas テクスチャを足すときは必ず再描画レジストリへ登録。検証は `__glTest('purge'/'lose'/'restore'/'checkback')`。非表示ペインでは restore がOS保留になり検証不能（visibilitychange 合成イベントで代替）
 - **Nostrリレーは劣化する**（2026-08-10 実障害）: trysteroデフォルトリレーの有料化・故障で「公開ルームが見えない/コード参加が固まる」全面障害になった。`trysteroTransport.ts` の RELAY_URLS に実測済みリレーを明示指定している。同種の症状が再発したら、ブラウザコンソールの `Trystero: relay failure` 警告を確認し、候補リレーへ `new WebSocket(url)` の生存プローブを実行して RELAY_URLS を更新する
 - ブラウザペインは hidden 状態だと rAF 停止 → スクリーンショット取得がタイムアウトする。検証は read_page / javascript_tool の DOM 駆動で行う（.card 要素クリック→ボタン click）
 - ビューポート0x0のときは ref クリックが (8,8) に落ちる → JS で直接 click
