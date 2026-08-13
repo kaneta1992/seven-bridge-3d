@@ -2721,7 +2721,20 @@ export class TableScene {
     (el as unknown as { __renderStats?: () => unknown }).__renderStats = () => {
       this.renderer.render(this.scene, this.camera);
       const r = this.renderer.info.render;
-      return { calls: r.calls, triangles: r.triangles, merged: MERGE_FURNITURE };
+      // リーク監視（契約38）: geometries/textures はGPU常駐資源数。時間とともに単調増加するなら
+      // dispose 漏れの蓄積＝低RAM端末の「徐々に重くなって落ちる」の直接原因。
+      const m = this.renderer.info.memory;
+      let sceneObjects = 0;
+      this.scene.traverse(() => sceneObjects++);
+      return {
+        calls: r.calls,
+        triangles: r.triangles,
+        merged: MERGE_FURNITURE,
+        geometries: m.geometries,
+        textures: m.textures,
+        programs: this.renderer.info.programs?.length ?? -1,
+        sceneObjects,
+      };
     };
   }
 

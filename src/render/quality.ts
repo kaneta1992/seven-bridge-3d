@@ -34,13 +34,17 @@ function isLowPower(): boolean {
 export function detectQuality(): QualityTier {
   const reduced = prefersReducedMotion();
   if (isLowPower()) {
+    // 契約38(R41): RAM 4GB 級（navigator.deviceMemory は Chrome系のみ・単位GB・上限8）は
+    // さらに絞る。DPR 1.0 でフィルレートと、フレームバッファ/ポストのメモリを大幅削減し、
+    // エントリーSoC（Unisoc T760等）の熱スロットリング（徐々に重くなる）と OOM 落ちを防ぐ。
+    const lowRam = ((navigator as { deviceMemory?: number }).deviceMemory ?? 8) <= 4;
     return {
       name: 'low',
-      maxDpr: 1.5,
+      maxDpr: lowRam ? 1.0 : 1.5,
       bloom: false,
-      shadowMap: 1024,
-      sparkCap: 160,
-      confettiCap: 180,
+      shadowMap: lowRam ? 512 : 1024,
+      sparkCap: lowRam ? 90 : 160,
+      confettiCap: lowRam ? 100 : 180,
       cameraShake: !reduced,
       envMap: false,
     };

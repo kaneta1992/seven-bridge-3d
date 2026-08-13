@@ -5,7 +5,8 @@
 // 実行: node scripts/merge-furniture.mjs  （入力: assets-src/meshy-room/*.glb → 出力: public/models/room-furniture.glb）
 import { Document, NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { quantize } from '@gltf-transform/functions';
+import { quantize, simplify } from '@gltf-transform/functions';
+import { MeshoptSimplifier } from 'meshoptimizer';
 import sharp from 'sharp';
 import { statSync, writeFileSync } from 'node:fs';
 import { MODELS, INSTANCES, FLOOR_Y } from './room-layout.mjs';
@@ -230,6 +231,11 @@ for (let a = 0; a < N_ATLAS; a++) {
   );
 }
 out.createScene('room').addChild(out.createNode('roomFurniture').setMesh(mesh));
+// 契約38(R41): メッシュ簡略化 — Meshy 生成物は過剰テッセレーションで合計39万三角形に達し、
+// エントリーGPU（Unisoc T760等・RAM4GB端末）で熱スロットリング→漸進的なフレーム低下を招いた。
+// 部屋距離では視覚差がほぼ無い誤差上限つきで約1/3へ削減する。
+await MeshoptSimplifier.ready;
+await out.transform(simplify({ simplifier: MeshoptSimplifier, ratio: 0.35, error: 0.001 }));
 await out.transform(quantize({ quantizePosition: 14, quantizeNormal: 10, quantizeTexcoord: 12 }));
 await io.write(OUT, out);
 writeFileSync(`${SRC}/merge-report.json`, JSON.stringify(report, null, 2));
